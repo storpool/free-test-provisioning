@@ -1,0 +1,24 @@
+---
+- name: "Unmount any active partitions on {{ current_drive }}"
+  shell: "umount {{ current_drive }}* || true"
+  changed_when: false
+
+- name: "Zapping all signatures (LVM/ZFS/GPT) on {{ current_drive }}"
+  command: "wipefs -a {{ current_drive }}"
+
+- name: "Gathering partition info for {{ current_drive }}"
+  parted:
+    device: "{{ current_drive }}"
+    unit: MiB
+  register: drive_info
+
+- name: "Removing all partitions on {{ current_drive }}"
+  parted:
+    device: "{{ current_drive }}"
+    number: "{{ item.num }}"
+    state: absent
+  loop: "{{ drive_info.partitions }}"
+  when: drive_info.partitions | length > 0
+
+- name: "Final clear of drive metadata"
+  command: "sgdisk --zap-all {{ current_drive }}"

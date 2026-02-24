@@ -1,0 +1,79 @@
+---
+- name: Generate Proxmox Ubuntu 24.04 Template
+  hosts: proxmox_nodes # Change this to your Proxmox host/group in your inventory
+  become: yes
+  gather_facts: false
+  run_once: true
+
+  tasks:
+    - name: Check if Proxmox VM/Template ID {{ vmid }} already exists
+      ansible.builtin.command: qm status {{ vmid }}
+      register: template_check
+      failed_when: false    # Prevent Ansible from failing if the VM doesn't exist
+      changed_when: false   # Checking status doesn't change system state
+
+    - name: Notice - Template already exists
+      ansible.builtin.debug:
+        msg: "VM/Template ID {{ vmid }} already exists! Skipping the build process."
+      when: template_check.rc == 0
+
+    # Wrap all the creation tasks inside this block.
+    # It will ONLY run if qm status returned an error (meaning the VM doesn't exist).
+    - name: Build and configure Proxmox Template
+      when: template_check.rc != 0
+      block:
+        - name: Ensure required host tools are installed
+          ansible.builtin.apt:
+            name:
+              - libguestfs-tools
+              - wget
+            state: present
+            update_cache: yes
+
+        - name: Download Ubuntu 24.04 Cloud Image
+          ansible.builtin.get_url:
+            url: "{{ vm_img_url }}"
+            dest: "{{ vm_img_dest }}"
+            mode: '0644'
+
+        - name: Pre-bake the image with packages, repo, and password
+          ansible.builtin.shell: >
+            virt-customize -a {{ vm_img_dest }}
+            --update
+            --install qemu-guest-agent,ioping,fio,git
+            --run-command 'rm -rf /root/fio-test-simple && git clone https://github.com/storpool/fio-test-simple /root/fio-test-simple'
+            --run-command 'systemctl enable qemu-guest-agent'
+            --root-password password:{{ vm_root_password }}
+          environment:
+            LIBGUESTFS_BACKEND: direct
+          register: customize_result
+          changed_when: "'Finishing off' in customize_result.stdout"
+
+        - name: Create Proxmox VM shell
+          ansible.builtin.command: >
+            qm create {{ vmid }}
+            --name {{ vm_name }}
+            --memory 2048
+            --cores 2
+            --net0 virtio,bridge=vmbr0
+
+        - name: Import customized disk into Proxmox VM
+          ansible.builtin.command: >
+            qm set {{ vmid }}
+            --scsihw virtio-scsi-pci
+            --scsi0 {{ storage_id }}:0,import-from={{ vm_img_dest }}
+
+        - name: Configure Cloud-Init, boot order, serial console, and guest agent
+          ansible.builtin.command: >
+            qm set {{ vmid }}
+            --ide2 {{ storage_id }}:cloudinit
+            --boot c --bootdisk scsi0
+            --agent enabled=1
+
+        - name: Convert VM to Proxmox Template
+          ansible.builtin.command: qm template {{ vmid }}
+
+        - name: Clean up the downloaded image file
+          ansible.builtin.file:
+            path: "{{ vm_img_dest }}"
+            state: absent

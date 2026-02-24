@@ -1,0 +1,91 @@
+#!/usr/bin/env ansible-playbook
+---
+- name: Selection of nodes with storpool_iolatmon service enabled
+  hosts: proxmox_nodes
+  gather_subset: 'min'
+  tasks:
+    - name: Populate service facts
+      service_facts:
+
+    - name: Add host to group 'storpool_iolatmon'
+      add_host:
+        name: "{{ inventory_hostname }}"
+        groups:
+          - storpool_iolatmon
+      when:
+        - groups['storpool_iolatmon'] is not defined
+        - ansible_facts.services['storpool_iolatmon.service'] is defined
+        - ansible_facts.services['storpool_iolatmon.service'].status == 'enabled'
+
+- name: Check of storpool_iolatmon host group
+  hosts: proxmox_nodes
+  gather_facts: false
+  tasks:
+    - name: Add first host to group 'storpool_iolatmon' if group is empty 
+      add_host:
+        name: "{{ inventory_hostname }}"
+        groups:
+          - storpool_iolatmon
+        run_once: true
+      when:
+        - groups['storpool_iolatmon'] is not defined
+
+- name: Updating of storpool_iolatmon service on selected nodes
+  hosts: storpool_iolatmon
+  gather_subset: 'min'
+#  vars_files:
+#    - vars/main.yml
+  tasks:
+    - name: Ensure "{{ ansible_user_dir }}/storpool_iolatmon" directory not exists
+      file:
+        path: "{{ ansible_user_dir }}/storpool_iolatmon"
+        state: absent
+      register: ensure_dir_not_exists
+
+    - name: Extract storpool_iolatmon archive
+      unarchive:
+        src: "{{ storpool_iolatmon_path }}"
+        remote_src: false
+        dest: "{{ ansible_user_dir }}/"
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_id }}"
+      register: extract_archive_result
+      when: ensure_dir_not_exists is succeeded
+
+    - name: Install storpool_iolatmon
+      shell: 
+        cmd: "{{ ansible_user_dir }}/storpool_iolatmon/install.sh"
+        chdir: "{{ ansible_user_dir }}/storpool_iolatmon/"
+      register: install_result
+      changed_when: false
+      become: "{{ ansible_effective_user_id != 0 }}"
+      when: extract_archive_result is succeeded
+
+    - name: Run "/usr/sbin/storpool_iolatmond --volumes-report" command
+      command: /usr/sbin/storpool_iolatmond --volumes-report
+      changed_when: false
+      register: volumes_report_result
+      become: "{{ ansible_effective_user_id != 0 }}"
+      when: install_result is succeeded
+
+    - name: Show volumes report
+      debug:
+        var: volumes_report_result.stdout
+      when: 
+        - volumes_report_result is succeeded
+
+    - name: Create volumes from volumes report (if any)
+      shell: |
+        {{ volumes_report_result.stdout }}
+      changed_when: false
+      register: volumes_creation_result
+      become: "{{ ansible_effective_user_id != 0 }}"
+      when: volumes_report_result is succeeded
+
+    - name: Start storpool_iolatmon
+      service:
+        name: storpool_iolatmon
+        enabled: true
+        state: restarted
+      become: "{{ ansible_effective_user_id != 0 }}"
+      when: volumes_creation_result is succeeded

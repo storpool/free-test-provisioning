@@ -1,0 +1,415 @@
+---
+- name: Configure Proxmox Network (StorPool Demo Layout)
+  hosts: proxmox
+  gather_facts: true
+  
+  tasks:
+
+    # 1. Identify if work is needed
+    - name: Check current hostname
+      ansible.builtin.setup:
+        filter: ansible_hostname
+
+    - name: Set fact if rename is required
+      ansible.builtin.set_fact:
+        perform_rename: "{{ ansible_hostname != inventory_hostname ~ '.' ~ dns_search_domain }}"
+
+    # 2. Stop Services (Only if renaming)
+    - name: Stop Proxmox Cluster Services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - pve-cluster
+        - corosync
+      when: perform_rename
+
+    # 3. Apply System Changes
+    - name: Set new Hostname (OS)
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}.{{ dns_search_domain }}"
+      when: perform_rename
+
+    - name: Update /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "^{{ ansible_default_ipv4.address }}"
+        line: "{{ iface_mgmt_cidr }} {{ inventory_hostname }} {{ inventory_hostname }}.{{ dns_search_domain }} pve"
+        state: present
+      when: perform_rename
+
+    # 4. Start Cluster Service (Creates the new DB entry)
+    - name: Start Proxmox Cluster Service
+      ansible.builtin.service:
+        name: pve-cluster
+        state: started
+      when: perform_rename
+
+    # 5. Restart Remaining Services
+    - name: Restart Proxmox Proxy and Daemon
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - corosync
+        - pveproxy
+        - pvedaemon
+      when: perform_rename
+
+   #  Set System DNS (Using raw pvesh command)
+    - name: Configure DNS settings via pvesh
+      command: >
+        pvesh set /nodes/{{ inventory_hostname }}/dns 
+        --search {{ dns_search_domain }} 
+        --dns1 {{ dns_servers.split(' ')[0] }} 
+        --dns2 {{ dns_servers.split(' ')[1] | default('') }} 
+        --dns3 {{ dns_servers.split(' ')[2] | default('') }}
+      changed_when: false
+
+   # 0. Install Dependencies (Corrected for Debian 12 / Proxmox 8)
+    - name: Ensure python3-pip is installed
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+        update_cache: yes
+
+    - name: Remove outdated apt proxmoxer
+      ansible.builtin.apt:
+        name: python3-proxmoxer
+        state: absent
+
+    - name: Install proxmoxer 2.0+ via pip
+      ansible.builtin.pip:
+        name: proxmoxer>=2.0.0
+        # Required for Debian 12+ to allow pip to install globally
+        extra_args: "--break-system-packages"
+
+   ## Clear SP drives
+    - name: Ensure parted is installed
+      apt:
+        name: parted
+        state: present
+        update_cache: yes
+        
+    - name: Map serial numbers to device paths
+      set_fact:
+        drives_to_wipe: >-
+          {{
+            ansible_facts.devices | dict2items
+            | selectattr('value.serial', 'defined')
+            | selectattr('value.serial', 'in', sp_nvme_serials)
+            | map(attribute='key')
+            | map('regex_replace', '^', '/dev/')
+            | list
+          }}
+
+    - name: Debug matched drives
+      debug:
+        msg: "Found matches: {{ drives_to_wipe }}"
+
+#    - name: Fail if no drives were matched (Safety Check)
+#      fail:
+#        msg: "Could not find drives matching the serials provided!"
+#      when: drives_to_wipe | length == 0
+
+    - name: Process drives found
+      include_tasks: inner_wipe.yml
+      loop: "{{ drives_to_wipe }}"
+      loop_control:
+        loop_var: current_drive
+   ##
+
+    - name: Stage Bridge vmbr0 (Empty/Internal Only)
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ ansible_host }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        iface: vmbr0
+        state: absent
+
+    # Configure Simple Static Interface
+    - name: Configure conf Interface
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ pve_api_host }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        iface: "{{ iface_conf }}"
+        iface_type: eth
+        cidr: "{{ iface_conf_cidr }}"
+        autostart: true
+        state: present
+
+    # 3. Configure Physical Ports for Management
+    - name: Configure Management Physical Port
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ pve_api_host }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        iface: "{{ iface_mgmt_phys }}"
+        iface_type: eth
+        autostart: true
+        state: present
+
+    # 4. Create the Management Bridge (mgmt)
+    - name: Create Management Bridge (mgmt)
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ pve_api_host }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        iface: mgmt
+        iface_type: bridge
+        bridge_ports: "{{ iface_mgmt_phys }}"
+        cidr: "{{ iface_mgmt_cidr }}/24"
+        gateway: "{{ iface_mgmt_gw }}"
+        autostart: true
+        state: present
+
+    # 5. Configure Bond Slaves (Manual)
+    - name: Ensure Bond Slaves are Manual (enp129...)
+      loop: "{{ iface_bond_slaves.split(' ') }}"
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ pve_api_host }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        iface: "{{ item }}"
+        iface_type: eth
+        autostart: true
+        state: present
+
+    # 6. Create the Bond (bond0)
+    - name: Create Active-Backup Bond (bond0)
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ pve_api_host }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        iface: bond0
+        iface_type: bond
+        slaves: "{{ iface_bond_slaves }}"
+        bond_mode: active-backup
+        bond_primary: "{{ iface_bond_primary }}"
+        #bond_miimon: 100
+        autostart: true
+        state: present
+
+    # 7. Create VLAN 562 (Static IP)
+    - name: Create VLAN 562 on Bond0
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ pve_api_host }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        iface: bond0.562
+        iface_type: vlan
+        #vlan_tag: 562
+        #vlan_raw_device: bond0
+        cidr: "{{ iface_vlan_special_cidr }}"
+        autostart: true
+        state: present
+
+    # 8. Create VLAN 563 (Manual - for bridge)
+    - name: Create VLAN 563 on Bond0
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ pve_api_host }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        iface: bond0.563
+        iface_type: vlan
+        #vlan_tag: 563
+        #vlan_raw_device: bond0
+        autostart: true
+        state: present
+
+    # 9. Create Bridge for VLAN 563 (vmbr0)
+    - name: Create Bridge vmbr0
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ pve_api_host }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        iface: vmbr0
+        iface_type: bridge
+        bridge_ports: bond0.563
+        autostart: true
+        state: present
+
+    # 10. APPLY CONFIGURATION
+    # WARNING: This will restart networking. If IPs change, Ansible may lose connection.
+    - name: Apply Network Configuration
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ pve_api_host }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        state: apply
+
+    - name: Get list of existing Proxmox nodes
+      ansible.builtin.shell: ls /etc/pve/nodes/
+      register: pve_nodes
+      changed_when: false
+
+    - name: Ensure Hostname is set
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+        
+    - name: Add all inventory hosts to /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED BLOCK: CLUSTER NODES"
+        block: |
+          {% for host in groups['all'] %}
+          {{ hostvars[host]['iface_mgmt_cidr'] }} {{ hostvars[host]['inventory_hostname'] }}.{{ dns_search_domain }} {{ hostvars[host]['inventory_hostname'] }}
+          {% endfor %}
+    - name: Generate SSH key for root (if missing)
+      ansible.builtin.user:
+        name: root
+        generate_ssh_key: yes
+        ssh_key_type: ed25519
+
+    - name: Fetch all public keys from nodes
+      ansible.builtin.fetch:
+        src: /root/.ssh/id_ed25519.pub
+        dest: "buffer/{{ inventory_hostname }}-id_ed25519.pub"
+        flat: yes
+      changed_when: false
+
+    - name: Distribute keys to all other nodes
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ lookup('file', 'buffer/' + item + '-id_ed25519.pub') }}"
+        state: present
+      loop: "{{ groups['proxmox'] }}"
+      when: item != inventory_hostname
+
+    - name: Update known_hosts to prevent verification prompt
+      ansible.builtin.shell: |
+        ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }} >> /root/.ssh/known_hosts
+        ssh-keyscan -H {{ hostvars[item]['ansible_hostname'] }} >> /root/.ssh/known_hosts
+      loop: "{{ groups['proxmox'] }}"
+      when: item != inventory_hostname
+      changed_when: false
+
+    - name: Ensure sudo is installed
+      ansible.builtin.apt:
+        name: sudo
+        state: present
+        update_cache: yes
+        
+    - name: Install the specific kernel version
+      ansible.builtin.apt:
+        name: 
+          - "{{ target_kernel_pkg }}"
+          - "proxmox-headers-{{ pin_version }}" # Headers are often needed for DKMS (StorPool/ZFS)
+        state: present
+        update_cache: yes
+
+    - name: Pin the kernel using proxmox-boot-tool
+      ansible.builtin.command:
+        cmd: "proxmox-boot-tool kernel pin {{ pin_version }}"
+
+    - name: Refresh the bootloader configuration
+      ansible.builtin.command:
+        cmd: "proxmox-boot-tool refresh"
+        
+    - name: Get current running kernel
+      ansible.builtin.command: uname -r
+      register: running_kernel
+      changed_when: false
+
+    - name: Reboot to apply new kernel
+      ansible.builtin.reboot:
+        msg: "Rebooting node to switch from {{ running_kernel.stdout }} to {{ pin_version }}"
+        post_reboot_delay: 30
+        reboot_timeout: 240
+      # Logic: If the running kernel is NOT the one we just pinned, we must reboot.
+      when: running_kernel.stdout != pin_version
+
+    #Clean unused kernels
+
+    # Protect the current kernel (Sanity Check)
+    - name: Get current running kernel version
+      ansible.builtin.command: uname -r
+      register: running_kernel
+      changed_when: false
+
+    - name: Display running kernel
+      ansible.builtin.debug:
+        msg: "Keeping kernel: {{ running_kernel.stdout }}"
+
+    # Identify Unused Kernels
+    # This shell command lists installed kernel packages and filters OUT the running one.
+    # It looks for both 'proxmox-kernel' (PVE 8) and 'pve-kernel' (PVE 7).
+    - name: List unused kernel packages
+      ansible.builtin.shell: |
+        dpkg --list | awk '/^ii/ { print $2 }' | \
+        grep -E '^(proxmox|pve)-kernel-[0-9]' | \
+        grep -v "{{ running_kernel.stdout }}"
+      register: kernels_to_remove
+      failed_when: kernels_to_remove.rc != 0 and kernels_to_remove.rc != 1
+      changed_when: false
+
+    - name: Show kernels to be removed
+      ansible.builtin.debug:
+        var: kernels_to_remove.stdout_lines
+
+    #Authorize the removal (Fixes the hook error)
+    - name: Authorize removal of Proxmox meta-packages
+      ansible.builtin.file:
+        path: /please-remove-proxmox-ve
+        state: touch
+
+    #Remove the specific unused kernels
+    - name: Remove unused kernel packages
+      ansible.builtin.apt:
+        name: "{{ kernels_to_remove.stdout_lines }}"
+        state: absent
+        purge: yes
+      when: kernels_to_remove.stdout_lines | length > 0
+
+    #(Optional) Cleanup the authorization file
+    - name: Remove authorization file
+      ansible.builtin.file:
+        path: /please-remove-proxmox-ve
+        state: absent
+        
+    # Remove the Kernels (Only if found)
+    - name: Remove unused kernel packages
+      ansible.builtin.apt:
+        name: "{{ kernels_to_remove.stdout_lines }}"
+        state: absent
+        purge: yes  # Removes config files too
+      when: kernels_to_remove.stdout_lines | length > 0
+
+    # Clean up Headers (Optional but recommended)
+    - name: List unused headers
+      ansible.builtin.shell: |
+        dpkg --list | awk '/^ii/ { print $2 }' | \
+        grep -E '^(proxmox|pve)-headers-[0-9]' | \
+        grep -v "{{ running_kernel.stdout }}"
+      register: headers_to_remove
+      failed_when: headers_to_remove.rc != 0 and headers_to_remove.rc != 1
+      changed_when: false
+
+    - name: Remove unused headers
+      ansible.builtin.apt:
+        name: "{{ headers_to_remove.stdout_lines }}"
+        state: absent
+        purge: yes
+      when: headers_to_remove.stdout_lines | length > 0
+
+    # Final Cleanup
+    - name: Run apt autoremove to clear dependencies
+      ansible.builtin.apt:
+        autoremove: yes
+        purge: yes
+
+    - name: Update Bootloader
+      ansible.builtin.command: update-grub
+      changed_when: true
+    

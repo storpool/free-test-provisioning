@@ -1,0 +1,1 @@
+ansible-playbook -vv -i inventory_sp_pve.yaml playbook_sp_pve.yml
