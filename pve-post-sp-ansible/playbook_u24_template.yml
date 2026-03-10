@@ -41,8 +41,13 @@
             virt-customize -a {{ vm_img_dest }}
             --update
             --install qemu-guest-agent,ioping,fio,git
-            --run-command 'rm -rf /root/fio-test-simple && git clone https://github.com/storpool/fio-test-simple /root/fio-test-simple'
+            --run-command 'rm -rf /root/fio-test-simple ; git clone https://github.com/storpool/fio-test-simple /root/fio-test-simple'
+            --run-command 'cp /root/fio-test-simple/fio.service /etc/systemd/system/ && systemctl daemon-reload'
             --run-command 'systemctl enable qemu-guest-agent'
+            --run-command 'echo > /etc/machine-id'
+            --run-command 'rm -f /etc/ssh/sshd_config.d/60-cloudimg-settings.conf'
+            --run-command 'echo "PermitRootLogin yes\nPasswordAuthentication yes" >> /etc/ssh/sshd_config.d/99-allow-root.conf'
+            --run-command 'sed -i "s/disable_root: true/disable_root: false/g" /etc/cloud/cloud.cfg'
             --root-password password:{{ vm_root_password }}
           environment:
             LIBGUESTFS_BACKEND: direct
@@ -61,14 +66,17 @@
           ansible.builtin.command: >
             qm set {{ vmid }}
             --scsihw virtio-scsi-pci
-            --scsi0 {{ storage_id }}:0,import-from={{ vm_img_dest }}
+            --virtio0 {{ storage_id }}:0,import-from={{ vm_img_dest }}
 
         - name: Configure Cloud-Init, boot order, serial console, and guest agent
           ansible.builtin.command: >
             qm set {{ vmid }}
             --ide2 {{ storage_id }}:cloudinit
-            --boot c --bootdisk scsi0
+            --boot c --bootdisk virtio0
             --agent enabled=1
+            --vga std
+            --ipconfig0 ip=dhcp
+
 
         - name: Convert VM to Proxmox Template
           ansible.builtin.command: qm template {{ vmid }}

@@ -1,0 +1,79 @@
+- name: Install StorPool Proxmox Integration and Watchdog
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: true
+  # CRITICAL: serial: 1 ensures we only put one node into maintenance mode at a time.
+  serial: 1
+
+  vars:
+    storpool_repo_file: "/etc/apt/sources.list.d/storpool-backports.sources"
+    storpool_keyring: "/usr/share/keyrings/storpool-keyring.gpg"
+
+  tasks:
+    # ---------------------------------------------------------
+    # 0. Fix Locale Warnings (Generate bg_BG)
+    # ---------------------------------------------------------
+    - name: Enable bg_BG.UTF-8 in locale.gen
+      ansible.builtin.replace:
+        path: /etc/locale.gen
+        regexp: '^#\s*bg_BG.UTF-8 UTF-8'
+        replace: 'bg_BG.UTF-8 UTF-8'
+      register: enable_locale
+
+    - name: Generate locales
+      ansible.builtin.command: locale-gen
+      when: enable_locale.changed
+
+    - name: Ensure the StorPool keyring exists
+      ansible.builtin.stat:
+        path: "{{ storpool_keyring }}"
+      register: keyring_stat
+
+    - name: Fail if StorPool keyring is missing
+      ansible.builtin.fail:
+        msg: >
+          The StorPool keyring was not found at {{ storpool_keyring }}.
+          Please ensure the basic StorPool client is installed before running this integration.
+      when: not keyring_stat.stat.exists
+
+    - name: Configure StorPool backports repository
+      ansible.builtin.copy:
+        dest: "{{ storpool_repo_file }}"
+        content: |
+          Types: deb deb-src
+          URIs: https://repo.storpool.com/public/contrib/debian/
+          Suites: {{ ansible_distribution_release }}-backports
+          Components: main
+          Signed-By: {{ storpool_keyring }}
+        owner: root
+        group: root
+        mode: '0644'
+      register: repo_added
+
+    - name: Update Apt cache
+      ansible.builtin.apt:
+        update_cache: true
+      when: repo_added.changed
+
+    - name: Install StorPool Proxmox integration packages
+      ansible.builtin.apt:
+        name:
+          - pve-storpool
+          - pve-storpool-watchdog
+        state: present
+      register: pkg_install
+
+    - name: Restart pve-ha-lrm service
+      ansible.builtin.service:
+        name: pve-ha-lrm
+        state: restarted
+      ignore_errors: true
+      when: pkg_install.changed
+
+    - name: Enable StorPool HCI HA Watchdog
+      # This script puts the node in maintenance mode, evacuates VMs, and enables the watchdog.
+      ansible.builtin.command:
+        cmd: /opt/storpool/pve/set-pve-watchdog storpool
+      register: watchdog_enable
+      changed_when: "'Replaced' in watchdog_enable.stdout or 'enabled' in watchdog_enable.stdout"
+

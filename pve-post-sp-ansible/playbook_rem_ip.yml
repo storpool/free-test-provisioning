@@ -1,0 +1,40 @@
+- name: Conditional Interface Removal by IP
+  hosts: proxmox_nodes
+  become: true
+
+  tasks:
+    - name: Gather network facts
+      setup:
+        gather_subset:
+          - network
+
+    - name: Identify interface by IP address
+      set_fact:
+        target_iface: >-
+          {%- set found = [] -%}
+          {%- for iface in ansible_interfaces -%}
+            {%- set iface_data = vars['ansible_' + iface | replace('-', '_')] | default({}) -%}
+            {%- if iface_data.ipv4 is defined and iface_data.ipv4.address == sp_mgmt_ip -%}
+              {%- set _ = found.append(iface) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ found | first | default(none) }}
+
+    - name: Remove the interface if found
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ inventory_hostname }}"
+        api_user: "root@pam"
+        api_password: "{{ vm_root_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        iface: "{{ target_iface }}"
+        state: absent
+      when: target_iface is not none
+
+    - name: Apply all pending network changes
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ inventory_hostname }}"
+        api_user: "root@pam"
+        api_password: "{{ vm_root_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        state: apply
+

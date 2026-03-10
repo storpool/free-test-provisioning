@@ -2,7 +2,8 @@
 - name: Configure Proxmox Network (StorPool Demo Layout)
   hosts: proxmox
   gather_facts: true
-  
+  serial: 1
+
   tasks:
 
     # 1. Identify if work is needed
@@ -84,6 +85,11 @@
         # Required for Debian 12+ to allow pip to install globally
         extra_args: "--break-system-packages"
 
+- name: Clear StorPool storage drives
+  hosts: proxmox
+  gather_facts: true
+
+  tasks:
    ## Clear SP drives
     - name: Ensure parted is installed
       apt:
@@ -118,6 +124,12 @@
       loop_control:
         loop_var: current_drive
    ##
+- name: Configure Network
+  hosts: proxmox
+  gather_facts: true
+  serial: 1
+
+  tasks:
 
     - name: Stage Bridge vmbr0 (Empty/Internal Only)
       community.proxmox.proxmox_node_network:
@@ -249,6 +261,21 @@
         node: "{{ inventory_hostname }}"
         state: apply
 
+#    - name: Update known_hosts to prevent verification prompt
+#      ansible.builtin.shell: |
+#        ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }} >> /root/.ssh/known_hosts
+#        ssh-keyscan -H {{ hostvars[item]['ansible_hostname'] }} >> /root/.ssh/known_hosts
+#      loop: "{{ groups['proxmox'] }}"
+#      when: item != inventory_hostname
+#      changed_when: false
+#      ignore_errors: yes
+
+- name: Install target Kernel
+  hosts: proxmox
+  gather_facts: true
+
+  tasks:
+
     - name: Get list of existing Proxmox nodes
       ansible.builtin.shell: ls /etc/pve/nodes/
       register: pve_nodes
@@ -287,13 +314,30 @@
       loop: "{{ groups['proxmox'] }}"
       when: item != inventory_hostname
 
-    - name: Update known_hosts to prevent verification prompt
-      ansible.builtin.shell: |
-        ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }} >> /root/.ssh/known_hosts
-        ssh-keyscan -H {{ hostvars[item]['ansible_hostname'] }} >> /root/.ssh/known_hosts
+    - name: Wait for SSH to become available on all nodes
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[item]['iface_mgmt_cidr'] }}"
+        port: 22
+        state: started
+        timeout: 300  # Will wait up to 5 minutes
+      loop: "{{ groups['proxmox'] }}"
+      when: item != inventory_hostname
+
+    - name: Get SSH fingerprints from nodes
+      ansible.builtin.command: "ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }}"
+      register: remote_keys
       loop: "{{ groups['proxmox'] }}"
       when: item != inventory_hostname
       changed_when: false
+
+    - name: Add fingerprints to known_hosts
+      ansible.builtin.known_hosts:
+        name: "{{ hostvars[item.item]['iface_mgmt_cidr'] }}"
+        key: "{{ item.stdout }}"
+        path: /root/.ssh/known_hosts
+        state: present
+      loop: "{{ remote_keys.results }}"
+      when: item.skipped is not defined and item.stdout != ""
 
     - name: Ensure sudo is installed
       ansible.builtin.apt:

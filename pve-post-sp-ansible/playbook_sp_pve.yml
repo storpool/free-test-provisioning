@@ -1,4 +1,7 @@
 ---
+# ==============================================================================
+# PLAY 1: Configure Proxmox Cluster
+# ==============================================================================
 - name: Configure Proxmox Cluster
   hosts: proxmox_nodes
   gather_facts: true
@@ -35,89 +38,14 @@
       throttle: 1  # Important: Join one by one
 
 # ==============================================================================
-# PLAY 1: Install Integration & Watchdog (Rolling Update)
+# PLAY 2: Install Integration & Watchdog (Rolling Update)
 # ==============================================================================
+
 - name: Install StorPool Proxmox Integration and Watchdog
-  hosts: proxmox_nodes
-  become: true
-  gather_facts: true
-  # CRITICAL: serial: 1 ensures we only put one node into maintenance mode at a time.
-  serial: 1
-
-  vars:
-    storpool_repo_file: "/etc/apt/sources.list.d/storpool-backports.sources"
-    storpool_keyring: "/usr/share/keyrings/storpool-keyring.gpg"
-
-  tasks:
-    # ---------------------------------------------------------
-    # 0. Fix Locale Warnings (Generate bg_BG)
-    # ---------------------------------------------------------
-    - name: Enable bg_BG.UTF-8 in locale.gen
-      ansible.builtin.replace:
-        path: /etc/locale.gen
-        regexp: '^#\s*bg_BG.UTF-8 UTF-8'
-        replace: 'bg_BG.UTF-8 UTF-8'
-      register: enable_locale
-
-    - name: Generate locales
-      ansible.builtin.command: locale-gen
-      when: enable_locale.changed
-
-    - name: Ensure the StorPool keyring exists
-      ansible.builtin.stat:
-        path: "{{ storpool_keyring }}"
-      register: keyring_stat
-
-    - name: Fail if StorPool keyring is missing
-      ansible.builtin.fail:
-        msg: >
-          The StorPool keyring was not found at {{ storpool_keyring }}.
-          Please ensure the basic StorPool client is installed before running this integration.
-      when: not keyring_stat.stat.exists
-
-    - name: Configure StorPool backports repository
-      ansible.builtin.copy:
-        dest: "{{ storpool_repo_file }}"
-        content: |
-          Types: deb deb-src
-          URIs: https://repo.storpool.com/public/contrib/debian/
-          Suites: {{ ansible_distribution_release }}-backports
-          Components: main
-          Signed-By: {{ storpool_keyring }}
-        owner: root
-        group: root
-        mode: '0644'
-      register: repo_added
-
-    - name: Update Apt cache
-      ansible.builtin.apt:
-        update_cache: true
-      when: repo_added.changed
-
-    - name: Install StorPool Proxmox integration packages
-      ansible.builtin.apt:
-        name:
-          - pve-storpool
-          - pve-storpool-watchdog
-        state: present
-      register: pkg_install
-
-    - name: Restart pve-ha-lrm service
-      ansible.builtin.service:
-        name: pve-ha-lrm
-        state: restarted
-      ignore_errors: true
-      when: pkg_install.changed
-
-    - name: Enable StorPool HCI HA Watchdog
-      # This script puts the node in maintenance mode, evacuates VMs, and enables the watchdog.
-      ansible.builtin.command:
-        cmd: /opt/storpool/pve/set-pve-watchdog storpool
-      register: watchdog_enable
-      changed_when: "'Replaced' in watchdog_enable.stdout or 'enabled' in watchdog_enable.stdout"
+  import_playbook: playbook_inst_sp_pve.yml
 
 # ==============================================================================
-# PLAY 2: Configure Storage (Runs Once for the Cluster)
+# PLAY 3: Configure Storage (Runs Once for the Cluster)
 # ==============================================================================
 - name: Configure StorPool Storage Entry
   hosts: proxmox_nodes
@@ -208,208 +136,20 @@
         msg: "Storage '{{ storpool_storage_id }}' created successfully using template '{{ storpool_template }}'."
       when: storage_add.changed
 
-# ==============================================================================
-# PLAY 3: Create Cloud-Init Template (Runs Once)
-# ==============================================================================
-- name: Create Debian 12 Cloud Template
-  hosts: proxmox_nodes
-  become: true
-  gather_facts: false
-  run_once: true
-
-  vars:
-    # --- Template Configuration ---
-    template_id: 999
-    template_name: "debian-12"
-    template_memory: 2048
-    template_cores: 2
-    storpool_storage_id: "storpool"
-    
-    # --- Image Source ---
-    image_url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
-    image_dest: "/tmp/debian-12-genericcloud-amd64.qcow2"
-
-  tasks:
-    - name: Check if Template ID {{ template_id }} exists
-      ansible.builtin.command: "qm status {{ template_id }}"
-      register: vm_status
-      failed_when: false
-      changed_when: false
-
-    - name: Download Cloud Image
-      ansible.builtin.get_url:
-        url: "{{ image_url }}"
-        dest: "{{ image_dest }}"
-        mode: '0644'
-      when: vm_status.rc != 0
-
-    - name: Create VM Structure
-      ansible.builtin.command:
-        # Create VM with 2GB RAM, VirtIO Network, and VirtIO SCSI Controller
-        cmd: >
-          qm create {{ template_id }} 
-          --name "{{ template_name }}" 
-          --memory {{ template_memory }} 
-          --cores {{ template_cores }} 
-          --net0 virtio,bridge=vmbr0 
-          --scsihw virtio-scsi-pci
-      when: vm_status.rc != 0
-
-    - name: Import Disk to StorPool
-      # This effectively moves the qcow2 into the StorPool storage
-      ansible.builtin.command:
-        cmd: "qm set {{ template_id }} --scsi0 {{ storpool_storage_id }}:0,import-from={{ image_dest }}"
-      when: vm_status.rc != 0
-
-    - name: Configure Cloud-Init and Boot
-      ansible.builtin.command:
-        cmd: >
-          qm set {{ template_id }}
-          --ide2 {{ storpool_storage_id }}:cloudinit 
-          --boot c --bootdisk scsi0 
-          --vga std,clipboard=vnc
-          --ipconfig0 ip=dhcp
-      when: vm_status.rc != 0
-
-    - name: Convert to Template
-      ansible.builtin.command:
-        cmd: "qm template {{ template_id }}"
-      when: vm_status.rc != 0
-
-    - name: Cleanup Downloaded Image
-      ansible.builtin.file:
-        path: "{{ image_dest }}"
-        state: absent
-      when: vm_status.rc != 0
-
-    - name: Template Status
-      ansible.builtin.debug:
-        msg: "Template {{ template_id }} ({{ template_name }}) is ready on storage {{ storpool_storage_id }}."
-
 
 # ==============================================================================
 # PLAY 4: Create Install StorPool GUI (Runs Once)
 # ==============================================================================
-- name: Install and Configure StorPool GUI
-  hosts: proxmox_nodes
-  become: true
-  gather_facts: false
-  run_once: true
 
-  vars:
-    gui_network_addr: "10.5.61.251"    # Example address; define this in your inventory
-    mgmt_interface: "mgmt"             # The device name for mgmt
-
-  tasks:
-    - name: Check if StorPool GUI service exists
-      service_facts:
-
-    - name: Installation Block
-      when: "'storpool_gui.service' not in services"
-      block:
-        - name: Download the StorPool GUI installer
-          get_url:
-            url: https://vault.storpool.com/install-gui
-            dest: /usr/local/bin/install-gui
-            mode: '0755'
-
-        - name: Run the StorPool GUI installer
-          command: /usr/local/bin/install-gui
-          # Creates is a secondary safety check
-          args:
-            creates: /usr/lib/systemd/system/storpool_gui.service
-
-    - name: Enable and start StorPool GUI service
-      systemd:
-        name: storpool_gui
-        enabled: yes
-        state: started
-
-    - name: Apply IP address immediately (Runtime)
-      shell: "ip addr add {{ gui_network_addr }}/24 dev {{ mgmt_interface }} label {{ mgmt_interface }}:1"
-      register: ip_cmd
-      failed_when:
-        - ip_cmd.rc != 0
-        - "'File exists' not in ip_cmd.stderr"
-        - "'Address already assigned' not in ip_cmd.stderr"
-      changed_when: ip_cmd.rc == 0
-
-    - name: Ensure secondary IP is permanent in /etc/network/interfaces
-      lineinfile:
-        path: /etc/network/interfaces
-        # Finds the specific interface config block
-        #insertafter: "iface {{ mgmt_interface }} inet static"
-        insertafter: "iface {{ mgmt_interface }}"
-        line: "    up ip addr add {{ gui_network_addr }}/24 dev {{ mgmt_interface }} label {{ mgmt_interface }}:1 || true"
-        state: present
-#      register: eth_config
-
-    - name: Ensure IP removal is handled on interface down
-      lineinfile:
-        path: /etc/network/interfaces
-        insertafter: "up ip addr add {{ gui_network_addr }}/24 dev {{ mgmt_interface }} label {{ mgmt_interface }}:1 || true"
-        line: "    down ip addr del {{ gui_network_addr }}/24 dev {{ mgmt_interface }} label {{ mgmt_interface }}:1 || true"
-        state: present
-
+- name: Install StorPool GUI
+  import_playbook: playbook_inst_sp_gui.yml
 
 # ==============================================================================
 # PLAY 5: Remove IP and down sp-mgmt iface
 # ==============================================================================
-- name: Conditional Interface Removal by IP
-  hosts: proxmox_nodes
-  become: true
 
-  tasks:
-    - name: Gather network facts
-      setup:
-        gather_subset:
-          - network
-
-    - name: Identify interface by IP address
-      set_fact:
-        target_iface: >-
-          {%- set found = [] -%}
-          {%- for iface in ansible_interfaces -%}
-            {%- set iface_data = vars['ansible_' + iface | replace('-', '_')] | default({}) -%}
-            {%- if iface_data.ipv4 is defined and iface_data.ipv4.address == sp_mgmt_ip -%}
-              {%- set _ = found.append(iface) -%}
-            {%- endif -%}
-          {%- endfor -%}
-          {{ found | first | default(none) }}
-
-    - name: Report status if IP not found
-      debug:
-        msg: "IP {{ sp_mgmt_ip }} was not found on any interface. Skipping removal tasks."
-      when: target_iface is none
-
-    - name: Removal Operations Block
-      when: target_iface is not none
-      block:
-        - name: 1. Remove IP and Down interface at runtime
-          shell: |
-            ip addr flush dev {{ target_iface }}
-            ip link set {{ target_iface }} down
-          ignore_errors: yes
-
-        - name: 2. Remove the 'auto' line for the interface
-          lineinfile:
-            path: /etc/network/interfaces
-            regexp: '^auto {{ target_iface }}'
-            state: absent
-
-        - name: 3. Remove the 'iface' block and all its parameters
-          # This regex finds the iface line and all subsequent indented lines
-          # until it hits a line starting with a non-whitespace character (the next interface)
-          replace:
-            path: /etc/network/interfaces
-            regexp: 'iface {{ target_iface }}\s+inet[\s\S]*?(?=\n\S|$)'
-            replace: ''
-          register: purge_result
-
-    - name: Skip message
-      debug:
-        msg: "Target IP not found. No changes made."
-      when: target_iface is none
+- name: Remove IP and down sp-mgmt iface
+  import_playbook: playbook_rem_ip.yml
 
 # ==============================================================================
 # PLAY 6: Install iolatmon

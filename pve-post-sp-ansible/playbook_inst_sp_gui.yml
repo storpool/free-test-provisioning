@@ -1,0 +1,56 @@
+- name: Install and Configure StorPool GUI
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: false
+  run_once: true
+
+  vars:
+    gui_network_addr: "10.5.61.251"    # Example address; define this in your inventory
+    mgmt_interface: "mgmt"             # The device name for mgmt
+
+  tasks:
+    - name: Check if StorPool GUI service exists
+      service_facts:
+
+    - name: Installation Block
+      when: "'storpool_gui.service' not in services"
+      block:
+        - name: Download the StorPool GUI installer
+          get_url:
+            url: https://vault.storpool.com/install-gui
+            dest: /usr/local/bin/install-gui
+            mode: '0755'
+
+        - name: Run the StorPool GUI installer
+          command: /usr/local/bin/install-gui
+          # Creates is a secondary safety check
+          args:
+            creates: /usr/lib/systemd/system/storpool_gui.service
+
+    - name: Enable and start StorPool GUI service
+      systemd:
+        name: storpool_gui
+        enabled: yes
+        state: started
+
+    - name: Configure GUI  IP
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ inventory_hostname }}"
+        api_user: "root@pam"
+        api_password: "{{ vm_root_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        iface: "{{ mgmt_interface }}:1"
+        iface_type: bridge
+        cidr: "{{ gui_network_addr }}/24"
+        autostart: true
+        state: present
+
+    - name: Apply all pending network changes
+      community.proxmox.proxmox_node_network:
+        api_host: "{{ inventory_hostname }}"
+        api_user: "root@pam"
+        api_password: "{{ vm_root_password | default(omit) }}"
+        node: "{{ inventory_hostname }}"
+        state: apply
+
+
