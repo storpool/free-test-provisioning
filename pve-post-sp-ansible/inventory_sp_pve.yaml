@@ -1,0 +1,28 @@
+all:
+  children:
+    proxmox_nodes:
+      hosts:
+        sof-1:
+          ansible_host: sof.1
+          sp_mgmt_ip: "10.1.1.1"
+        sof-2:
+          ansible_host: sof.2
+          sp_mgmt_ip: "10.1.1.2"
+        sof-3:
+          ansible_host: sof.3
+          sp_mgmt_ip: "10.1.1.3"
+      vars:
+        ansible_user: root
+        ansible_password: "XXXXXX"
+        storage_id: "storpool"
+        storpool_template: "nvme"
+        storpool_content: "images"
+        cluster_name: "demo3"
+        cluster_network_addr: "10.1.2.1"
+        gui_network_addr: "10.1.2.251"
+        storpool_iolatmon_path: /home/tools/storpool_iolatmon.tgz
+        vmid: 1000
+        vm_name: "ubuntu-24-template"
+        vm_root_password: "XXXXXX" # Hardcoded root password for the guest VM template
+        vm_img_url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+        vm_img_dest: "/root/noble-server-cloudimg-amd64.img"
