@@ -1,0 +1,60 @@
+all:
+  children:
+    oracle_nodes:
+      # --- Shared Variables for all nodes ---
+      vars:
+        ansible_user: root
+        ansible_password: "XXXXXX" # Uncomment if not using SSH keys
+        
+        # Interface Names (Same across all identical hardware nodes)
+        iface_bond_slaves: "enp129s0f0np0 enp129s0f1np1"
+        iface_bond_primary: "enp129s0f0np0"
+        
+        # Gateways (Shared)
+        iface_mgmt_gw: "10.1.2.254"
+        
+        # DNS (Shared)
+        dns_servers: "1.0.0.1 8.8.8.8 10.1.2.254"
+        dns_search_domain: "sof.lab"
+        
+        # Oracle Linux Kernel (Example UEK version)
+        target_kernel_pkg: "kernel-uek"
+        pin_version: "5.15.0-316.196.4.1.el8uek.x86_64"
+        
+        cluster_name: "demo3"
+        cluster_network_addr: "10.1.2.1"
+
+      # --- Specific Host Definitions ---
+      hosts:
+        sof-1:
+          ansible_host: 10.1.1.1
+          iface_conf: "eno1np0"
+          iface_conf_cidr: "10.1.1.1/24"
+          iface_mgmt_phys: "eno2np1"
+          iface_mgmt_cidr: "10.1.2.1"
+          iface_mgmt_gw: "10.1.2.254"
+          iface_vlan_special_cidr: "10.1.2.1/24" 
+          sp_nvme_serials:
+            - "SN1234354"
+            
+        sof-2:
+          ansible_host: 10.1.1.2
+          iface_conf: "enp67s0f0"
+          iface_conf_cidr: "10.1.1.2/24"
+          iface_mgmt_phys: "enp67s0f1"
+          iface_mgmt_cidr: "10.1.2.2"
+          iface_mgmt_gw: "10.1.2.254"
+          iface_vlan_special_cidr: "10.1.2.2/24" 
+          sp_nvme_serials:
+            - "SN1234354"
+
+        sof-3:
+          ansible_host: 10.1.1.3
+          iface_conf: "enp67s0f0"
+          iface_conf_cidr: "10.1.1.3/24"
+          iface_mgmt_phys: "enp67s0f1"
+          iface_mgmt_cidr: "10.1.2.3"
+          iface_mgmt_gw: "10.1.2.254"
+          iface_vlan_special_cidr: "10.1.2.3/24" 
+          sp_nvme_serials:
+            - "SN1234354"
