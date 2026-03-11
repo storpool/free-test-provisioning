@@ -110,6 +110,7 @@
         ifname: "{{ iface_mgmt_phys }}"
         type: ethernet
         master: mgmt
+        slave_type: bridge
         state: present
 
     # 4. Create Active-Backup Bond (bond0)
@@ -130,6 +131,7 @@
         ifname: "{{ item }}"
         type: ethernet
         master: bond0
+        slave_type: bond
         state: present
       loop: "{{ iface_bond_slaves.split(' ') }}"
 
@@ -160,6 +162,7 @@
         vlanid: 563
         vlandev: bond0
         master: vmbr0
+        slave_type: bridge
         state: present
 
     - name: Reload NetworkManager to apply changes
