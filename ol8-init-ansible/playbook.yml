@@ -119,9 +119,9 @@
         conn_name: bond0
         ifname: bond0
         type: bond
-        bond:
-          mode: active-backup
-          primary: "{{ iface_bond_primary }}"
+        mode: active-backup
+        primary: "{{ iface_bond_primary }}"
+        # miimon: 100
         state: present
 
     # 5. Attach Slaves to Bond
