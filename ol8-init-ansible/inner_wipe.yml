@@ -6,19 +6,12 @@
 - name: "Zapping all signatures (LVM/ZFS/GPT) on {{ current_drive }}"
   ansible.builtin.command: "wipefs -a {{ current_drive }}"
 
-- name: "Gathering partition info for {{ current_drive }}"
-  community.general.parted:
-    device: "{{ current_drive }}"
-    unit: MiB
-  register: drive_info
-
-- name: "Removing all partitions on {{ current_drive }}"
-  community.general.parted:
-    device: "{{ current_drive }}"
-    number: "{{ item.num }}"
-    state: absent
-  loop: "{{ drive_info.partitions }}"
-  when: drive_info.partitions | length > 0
-
-- name: "Final clear of drive metadata"
+- name: "Destroying partition tables and metadata on {{ current_drive }}"
   ansible.builtin.command: "sgdisk --zap-all {{ current_drive }}"
+  register: sgdisk_result
+  # sgdisk returns 2 if the disk is already completely blank, which is fine
+  failed_when: sgdisk_result.rc not in [0, 2] 
+
+- name: "Informing the OS of partition changes on {{ current_drive }}"
+  ansible.builtin.command: "partprobe {{ current_drive }}"
+  changed_when: false
