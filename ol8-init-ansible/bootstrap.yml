@@ -1,0 +1,23 @@
+---
+- name: Bootstrap Oracle Linux 8 nodes with Python 3.9
+  hosts: oracle_nodes
+  # CRITICAL: We must disable fact gathering, otherwise Ansible will try to 
+  # run the setup module using the broken Python 3.6 interpreter and fail.
+  gather_facts: false 
+  become: true # Run as root
+
+  tasks:
+    - name: Install Python 3.9 using raw SSH commands
+      ansible.builtin.raw: dnf install -y python39
+      register: install_result
+      # 'raw' doesn't know about state, so we manually check if it did anything
+      changed_when: "'Nothing to do' not in install_result.stdout"
+
+    - name: Verify Python 3.9 is installed and accessible
+      ansible.builtin.raw: /usr/bin/python3.9 --version
+      register: python_check
+      changed_when: false
+
+    - name: Display the installed Python version
+      ansible.builtin.debug:
+        msg: "Success! Found: {{ python_check.stdout | trim }}"

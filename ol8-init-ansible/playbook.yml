@@ -1,4 +1,7 @@
 ---
+- name: Install Python 3.9
+  import_playbook: bootstrap.yml
+
 - name: Configure Oracle Linux System & Network (StorPool Demo Layout)
   hosts: oracle_nodes
   gather_facts: true
