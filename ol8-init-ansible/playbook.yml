@@ -72,7 +72,7 @@
 - name: Configure Network with NetworkManager
   hosts: oracle_nodes
   gather_facts: true
-#  serial: 1
+  serial: 1
 
   tasks:
     # 0. CLEANUP: Delete default profiles that hijack the interfaces
@@ -153,7 +153,6 @@
         conn_name: vmbr0
         ifname: vmbr0
         type: bridge
-        method4: disabled
         state: present
 
     # 8. Create VLAN 563 and attach to vmbr0
