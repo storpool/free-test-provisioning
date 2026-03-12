@@ -89,6 +89,7 @@
         ifname: "{{ iface_conf }}"
         type: ethernet
         ip4: "{{ iface_conf_cidr }}"
+        method4: manual
         state: present
 
     # 2. Create the Management Bridge (mgmt)
@@ -101,6 +102,7 @@
         gw4: "{{ iface_mgmt_gw }}"
         dns4: "{{ dns_servers.split(' ') }}"
         dns4_search: "{{ dns_search_domain }}"
+        method4: manual
         state: present
 
     # 3. Attach physical mgmt port to bridge
@@ -151,6 +153,7 @@
         conn_name: vmbr0
         ifname: vmbr0
         type: bridge
+        method4: disabled
         state: present
 
     # 8. Create VLAN 563 and attach to vmbr0
