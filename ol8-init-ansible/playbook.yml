@@ -246,10 +246,20 @@
           - "{{ target_kernel_pkg }}-devel-{{ pin_version }}" # Headers for DKMS
         state: present
 
+    - name: Find the exact vmlinuz path for the target kernel
+      ansible.builtin.shell: "ls /boot/vmlinuz*{{ pin_version }}* | head -n 1"
+      register: exact_kernel_path
+      changed_when: false
+      # This ensures the playbook fails with a helpful message if the kernel didn't actually install
+      failed_when: exact_kernel_path.stdout == ""
+
+    - name: Debug exact kernel path
+      ansible.builtin.debug:
+        msg: "Found kernel at: {{ exact_kernel_path.stdout }}"
+
     - name: Pin the kernel using grubby
       ansible.builtin.command:
-        cmd: "grubby --set-default /boot/vmlinuz-{{ pin_version }}"
-
+        cmd: "grubby --set-default {{ exact_kernel_path.stdout }}"
     - name: Get current running kernel
       ansible.builtin.command: uname -r
       register: running_kernel
