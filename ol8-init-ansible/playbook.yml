@@ -226,6 +226,9 @@
       loop: "{{ groups['oracle_nodes'] }}"
       when: item != inventory_hostname
       changed_when: false
+      retries: 6
+      delay: 5
+      until: remote_keys.rc == 0
 
     - name: Add fingerprints to known_hosts
       ansible.builtin.known_hosts:
