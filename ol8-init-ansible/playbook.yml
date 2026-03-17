@@ -243,6 +243,7 @@
         vlanid: 562
         vlandev: bond0
         ip4: "{{ iface_vlan_special_cidr }}"
+        method4: manual
         state: present
 
     # 7. Create Bridge for VLAN 563 (vmbr0)
@@ -251,6 +252,8 @@
         conn_name: vmbr0
         ifname: vmbr0
         type: bridge
+        method4: disabled
+        method6: disabled
         state: present
 
     # 8. Create VLAN 563 and attach to vmbr0
