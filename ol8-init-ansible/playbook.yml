@@ -33,9 +33,9 @@
 
     # 2. Network Prerequisites
     - name: Ensure NetworkManager Python dependencies are installed
-      ansible.builtin.dnf:
-        name: NetworkManager-libnm
-        state: present
+      ansible.builtin.command: dnf install -y NetworkManager-libnm
+      register: dnf_nm
+      changed_when: "'Nothing to do' not in dnf_nm.stdout"
 
 - name: Clear StorPool storage drives
   hosts: oracle_nodes
@@ -178,7 +178,7 @@
       community.general.nmcli:
         conn_name: "{{ item }}"
         state: absent
-      loop: "{{ [iface_mgmt_phys] + iface_bond_slaves.split(' ') }}"
+      loop: "{{ iface_bond_slaves.split(' ') }}"
 
     # 1. Configure conf Interface (SSH)
     - name: Configure conf Interface
@@ -188,29 +188,6 @@
         type: ethernet
         ip4: "{{ iface_conf_cidr }}"
         method4: manual
-        state: present
-
-    # 2. Create the Management Bridge (mgmt)
-    - name: Create Management Bridge (mgmt)
-      community.general.nmcli:
-        conn_name: mgmt
-        ifname: mgmt
-        type: bridge
-        ip4: "{{ iface_mgmt_cidr }}/24"
-        gw4: "{{ iface_mgmt_gw }}"
-        dns4: "{{ dns_servers.split(' ') }}"
-        dns4_search: "{{ dns_search_domain }}"
-        method4: manual
-        state: present
-
-    # 3. Attach physical mgmt port to bridge
-    - name: Attach physical mgmt port to bridge
-      community.general.nmcli:
-        conn_name: "bridge-slave-{{ iface_mgmt_phys }}"
-        ifname: "{{ iface_mgmt_phys }}"
-        type: ethernet
-        master: mgmt
-        slave_type: bridge
         state: present
 
     # 4. Create Active-Backup Bond (bond0)
@@ -233,6 +210,32 @@
         slave_type: bond
         state: present
       loop: "{{ iface_bond_slaves.split(' ') }}"
+
+    # 2. Create the Management Bridge (ovirtmgmt)
+    - name: Create Management Bridge (ovirtmgmt)
+      community.general.nmcli:
+        conn_name: ovirtmgmt
+        ifname: ovirtmgmt
+        type: bridge
+        mtu: 1500
+        ip4: "{{ iface_mgmt_cidr }}/24"
+        gw4: "{{ iface_mgmt_gw }}"
+        dns4: "{{ dns_servers.split(' ') }}"
+        dns4_search: "{{ dns_search_domain }}"
+        method4: manual
+        state: present
+
+    # . Create VLAN 561 and attach to ovirtmgmt
+    - name: Create VLAN 561 and attach to ovirtmgmt
+      community.general.nmcli:
+        conn_name: bond0.561
+        ifname: bond0.561
+        type: vlan
+        vlanid: 561
+        vlandev: bond0
+        master: ovirtmgmt
+        slave_type: bridge
+        state: present
 
     # 6. Create VLAN 562
     - name: Create VLAN 562 on Bond0
@@ -279,6 +282,6 @@
       ansible.builtin.command: "nmcli con up {{ item }}"
       loop:
         - bond0
-        - mgmt
+        - ovirtmgmt
         - vmbr0
       changed_when: true
