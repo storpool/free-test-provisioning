@@ -113,8 +113,13 @@
     - name: Remove old/unused kernels (Leaves running and default)
       ansible.builtin.command:
         cmd: "dnf remove --oldinstallonly --setopt installonly_limit=2 -y"
-      changed_when: true
-
+      register: kernel_cleanup
+      # Fail ONLY if the exit code isn't 0 AND the error isn't the "No old packages" message
+      failed_when: 
+        - kernel_cleanup.rc != 0
+        - "'No old installonly packages found for removal' not in kernel_cleanup.stderr"
+      # Only report as "changed" if the command succeeded (exit code 0)
+      changed_when: kernel_cleanup.rc == 0
 
 - name: Configure Network with NetworkManager
   hosts: oracle_nodes
