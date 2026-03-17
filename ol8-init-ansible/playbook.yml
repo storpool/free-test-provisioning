@@ -69,59 +69,11 @@
       loop_control:
         loop_var: current_drive
 
-- name: Install target Kernel and Configure SSH
+- name: Install target Kernel
   hosts: oracle_nodes
   gather_facts: true
 
   tasks:
-    - name: Add all inventory hosts to /etc/hosts
-      ansible.builtin.blockinfile:
-        path: /etc/hosts
-        marker: "# {mark} ANSIBLE MANAGED BLOCK: CLUSTER NODES"
-        block: |
-          {% for host in groups['oracle_nodes'] %}
-          {{ hostvars[host]['iface_mgmt_cidr'] }} {{ hostvars[host]['inventory_hostname'] }}.{{ dns_search_domain }} {{ hostvars[host]['inventory_hostname'] }}
-          {% endfor %}
-
-    - name: Generate SSH key for root (if missing)
-      ansible.builtin.user:
-        name: root
-        generate_ssh_key: yes
-        ssh_key_type: ed25519
-
-    - name: Fetch all public keys from nodes
-      ansible.builtin.fetch:
-        src: /root/.ssh/id_ed25519.pub
-        dest: "buffer/{{ inventory_hostname }}-id_ed25519.pub"
-        flat: yes
-      changed_when: false
-
-    - name: Distribute keys to all other nodes
-      ansible.posix.authorized_key:
-        user: root
-        key: "{{ lookup('file', 'buffer/' + item + '-id_ed25519.pub') }}"
-        state: present
-      loop: "{{ groups['oracle_nodes'] }}"
-      when: item != inventory_hostname
-
-    - name: Get SSH fingerprints from nodes
-      ansible.builtin.command: "ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }}"
-      register: remote_keys
-      loop: "{{ groups['oracle_nodes'] }}"
-      when: item != inventory_hostname
-      changed_when: false
-      retries: 6
-      delay: 5
-      until: remote_keys.rc == 0
-
-    - name: Add fingerprints to known_hosts
-      ansible.builtin.known_hosts:
-        name: "{{ hostvars[item.item]['iface_mgmt_cidr'] }}"
-        key: "{{ item.stdout }}"
-        path: /root/.ssh/known_hosts
-        state: present
-      loop: "{{ remote_keys.results }}"
-      when: item.skipped is not defined and item.stdout != ""
 
     - name: Install the specific kernel version (Core, Modules, and Devel)
       ansible.builtin.command: >
@@ -282,3 +234,57 @@
         - ovirtmgmt
         - vmbr0
       changed_when: true
+
+- name: Configure SSH
+  hosts: oracle_nodes
+  gather_facts: true
+
+  tasks:
+    - name: Add all inventory hosts to /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED BLOCK: CLUSTER NODES"
+        block: |
+          {% for host in groups['oracle_nodes'] %}
+          {{ hostvars[host]['iface_mgmt_cidr'] }} {{ hostvars[host]['inventory_hostname'] }}.{{ dns_search_domain }} {{ hostvars[host]['inventory_hostname'] }}
+          {% endfor %}
+
+    - name: Generate SSH key for root (if missing)
+      ansible.builtin.user:
+        name: root
+        generate_ssh_key: yes
+        ssh_key_type: ed25519
+
+    - name: Fetch all public keys from nodes
+      ansible.builtin.fetch:
+        src: /root/.ssh/id_ed25519.pub
+        dest: "buffer/{{ inventory_hostname }}-id_ed25519.pub"
+        flat: yes
+      changed_when: false
+
+    - name: Distribute keys to all other nodes
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ lookup('file', 'buffer/' + item + '-id_ed25519.pub') }}"
+        state: present
+      loop: "{{ groups['oracle_nodes'] }}"
+      when: item != inventory_hostname
+
+    - name: Get SSH fingerprints from nodes
+      ansible.builtin.command: "ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }}"
+      register: remote_keys
+      loop: "{{ groups['oracle_nodes'] }}"
+      when: item != inventory_hostname
+      changed_when: false
+      retries: 6
+      delay: 5
+      until: remote_keys.rc == 0
+
+    - name: Add fingerprints to known_hosts
+      ansible.builtin.known_hosts:
+        name: "{{ hostvars[item.item]['iface_mgmt_cidr'] }}"
+        key: "{{ item.stdout }}"
+        path: /root/.ssh/known_hosts
+        state: present
+      loop: "{{ remote_keys.results }}"
+      when: item.skipped is not defined and item.stdout != ""
