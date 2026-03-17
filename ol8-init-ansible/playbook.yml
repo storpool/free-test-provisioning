@@ -43,13 +43,10 @@
 
   tasks:
     - name: Ensure disk management tools are installed
-      ansible.builtin.dnf:
-        name: 
-          - parted
-          - gdisk
-          - util-linux
-        state: present
-        
+      ansible.builtin.command: dnf install -y parted gdisk util-linux
+      register: dnf_disk
+      changed_when: "'Nothing to do' not in dnf_disk.stdout"
+
     - name: Map serial numbers to device paths
       ansible.builtin.set_fact:
         drives_to_wipe: >-
