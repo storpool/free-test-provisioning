@@ -72,10 +72,105 @@
       loop_control:
         loop_var: current_drive
 
+- name: Install target Kernel and Configure SSH
+  hosts: oracle_nodes
+  gather_facts: true
+
+  tasks:
+    - name: Add all inventory hosts to /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED BLOCK: CLUSTER NODES"
+        block: |
+          {% for host in groups['oracle_nodes'] %}
+          {{ hostvars[host]['iface_mgmt_cidr'] }} {{ hostvars[host]['inventory_hostname'] }}.{{ dns_search_domain }} {{ hostvars[host]['inventory_hostname'] }}
+          {% endfor %}
+
+    - name: Generate SSH key for root (if missing)
+      ansible.builtin.user:
+        name: root
+        generate_ssh_key: yes
+        ssh_key_type: ed25519
+
+    - name: Fetch all public keys from nodes
+      ansible.builtin.fetch:
+        src: /root/.ssh/id_ed25519.pub
+        dest: "buffer/{{ inventory_hostname }}-id_ed25519.pub"
+        flat: yes
+      changed_when: false
+
+    - name: Distribute keys to all other nodes
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ lookup('file', 'buffer/' + item + '-id_ed25519.pub') }}"
+        state: present
+      loop: "{{ groups['oracle_nodes'] }}"
+      when: item != inventory_hostname
+
+    - name: Get SSH fingerprints from nodes
+      ansible.builtin.command: "ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }}"
+      register: remote_keys
+      loop: "{{ groups['oracle_nodes'] }}"
+      when: item != inventory_hostname
+      changed_when: false
+      retries: 6
+      delay: 5
+      until: remote_keys.rc == 0
+
+    - name: Add fingerprints to known_hosts
+      ansible.builtin.known_hosts:
+        name: "{{ hostvars[item.item]['iface_mgmt_cidr'] }}"
+        key: "{{ item.stdout }}"
+        path: /root/.ssh/known_hosts
+        state: present
+      loop: "{{ remote_keys.results }}"
+      when: item.skipped is not defined and item.stdout != ""
+
+    - name: Install the specific kernel version (Core, Modules, and Devel)
+      ansible.builtin.command: >
+        dnf install -y 
+        kernel-uek-core-{{ pin_version }} 
+        kernel-uek-modules-{{ pin_version }} 
+        kernel-uek-devel-{{ pin_version }}
+      register: dnf_kernel
+      changed_when: "'Nothing to do' not in dnf_kernel.stdout"
+
+    - name: Find the exact vmlinuz path for the target kernel
+      ansible.builtin.shell: "ls /boot/vmlinuz*{{ pin_version }}* | head -n 1"
+      register: exact_kernel_path
+      changed_when: false
+      # This ensures the playbook fails with a helpful message if the kernel didn't actually install
+      failed_when: exact_kernel_path.stdout == ""
+
+    - name: Debug exact kernel path
+      ansible.builtin.debug:
+        msg: "Found kernel at: {{ exact_kernel_path.stdout }}"
+
+    - name: Pin the kernel using grubby
+      ansible.builtin.command:
+        cmd: "grubby --set-default {{ exact_kernel_path.stdout }}"
+    - name: Get current running kernel
+      ansible.builtin.command: uname -r
+      register: running_kernel
+      changed_when: false
+
+    - name: Reboot to apply new kernel
+      ansible.builtin.reboot:
+        msg: "Rebooting node to switch from {{ running_kernel.stdout }} to {{ pin_version }}"
+        post_reboot_delay: 30
+        reboot_timeout: 240
+      when: running_kernel.stdout != pin_version
+
+    - name: Remove old/unused kernels (Leaves running and default)
+      ansible.builtin.command:
+        cmd: "dnf remove --oldinstallonly --setopt installonly_limit=2 -y"
+      changed_when: true
+
+
 - name: Configure Network with NetworkManager
   hosts: oracle_nodes
   gather_facts: true
-  serial: 1
+#  serial: 1
 
   tasks:
     # 0. CLEANUP: Delete default profiles that hijack the interfaces
@@ -183,98 +278,4 @@
         - bond0
         - mgmt
         - vmbr0
-      changed_when: true
-
-- name: Install target Kernel and Configure SSH
-  hosts: oracle_nodes
-  gather_facts: true
-
-  tasks:
-    - name: Add all inventory hosts to /etc/hosts
-      ansible.builtin.blockinfile:
-        path: /etc/hosts
-        marker: "# {mark} ANSIBLE MANAGED BLOCK: CLUSTER NODES"
-        block: |
-          {% for host in groups['oracle_nodes'] %}
-          {{ hostvars[host]['iface_mgmt_cidr'] }} {{ hostvars[host]['inventory_hostname'] }}.{{ dns_search_domain }} {{ hostvars[host]['inventory_hostname'] }}
-          {% endfor %}
-
-    - name: Generate SSH key for root (if missing)
-      ansible.builtin.user:
-        name: root
-        generate_ssh_key: yes
-        ssh_key_type: ed25519
-
-    - name: Fetch all public keys from nodes
-      ansible.builtin.fetch:
-        src: /root/.ssh/id_ed25519.pub
-        dest: "buffer/{{ inventory_hostname }}-id_ed25519.pub"
-        flat: yes
-      changed_when: false
-
-    - name: Distribute keys to all other nodes
-      ansible.posix.authorized_key:
-        user: root
-        key: "{{ lookup('file', 'buffer/' + item + '-id_ed25519.pub') }}"
-        state: present
-      loop: "{{ groups['oracle_nodes'] }}"
-      when: item != inventory_hostname
-
-    - name: Get SSH fingerprints from nodes
-      ansible.builtin.command: "ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }}"
-      register: remote_keys
-      loop: "{{ groups['oracle_nodes'] }}"
-      when: item != inventory_hostname
-      changed_when: false
-      retries: 6
-      delay: 5
-      until: remote_keys.rc == 0
-
-    - name: Add fingerprints to known_hosts
-      ansible.builtin.known_hosts:
-        name: "{{ hostvars[item.item]['iface_mgmt_cidr'] }}"
-        key: "{{ item.stdout }}"
-        path: /root/.ssh/known_hosts
-        state: present
-      loop: "{{ remote_keys.results }}"
-      when: item.skipped is not defined and item.stdout != ""
-
-    - name: Install the specific kernel version (Core, Modules, and Devel)
-      ansible.builtin.command: >
-        dnf install -y 
-        kernel-uek-core-{{ pin_version }} 
-        kernel-uek-modules-{{ pin_version }} 
-        kernel-uek-devel-{{ pin_version }}
-      register: dnf_kernel
-      changed_when: "'Nothing to do' not in dnf_kernel.stdout"
-
-    - name: Find the exact vmlinuz path for the target kernel
-      ansible.builtin.shell: "ls /boot/vmlinuz*{{ pin_version }}* | head -n 1"
-      register: exact_kernel_path
-      changed_when: false
-      # This ensures the playbook fails with a helpful message if the kernel didn't actually install
-      failed_when: exact_kernel_path.stdout == ""
-
-    - name: Debug exact kernel path
-      ansible.builtin.debug:
-        msg: "Found kernel at: {{ exact_kernel_path.stdout }}"
-
-    - name: Pin the kernel using grubby
-      ansible.builtin.command:
-        cmd: "grubby --set-default {{ exact_kernel_path.stdout }}"
-    - name: Get current running kernel
-      ansible.builtin.command: uname -r
-      register: running_kernel
-      changed_when: false
-
-    - name: Reboot to apply new kernel
-      ansible.builtin.reboot:
-        msg: "Rebooting node to switch from {{ running_kernel.stdout }} to {{ pin_version }}"
-        post_reboot_delay: 30
-        reboot_timeout: 240
-      when: running_kernel.stdout != pin_version
-
-    - name: Remove old/unused kernels (Leaves running and default)
-      ansible.builtin.command:
-        cmd: "dnf remove --oldinstallonly --setopt installonly_limit=2 -y"
       changed_when: true
