@@ -299,3 +299,22 @@
         state: present
       loop: "{{ remote_keys.results }}"
       when: item.skipped is not defined and item.stdout != ""
+
+- name: Install kvm and ovirt repos
+  hosts: oracle_nodes
+  gather_facts: false
+
+  tasks:
+    - name: Enable ol8_baseos_latest repository
+      ansible.builtin.command: dnf config-manager --enable ol8_baseos_latest
+      register: repo_enable
+      changed_when: true
+
+    - name: Install Oracle oVirt release 4.5 repository package
+      ansible.builtin.command: dnf install -y oracle-ovirt-release-45-el8
+      register: ovirt_repo_install
+      changed_when: "'Nothing to do' not in ovirt_repo_install.stdout"
+
+    - name: Clean DNF cache
+      ansible.builtin.command: dnf clean all
+      changed_when: false
