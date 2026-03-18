@@ -170,6 +170,7 @@
         conn_name: bond0
         ifname: bond0
         type: bond
+        mtu: 9000
         mode: active-backup
         primary: "{{ iface_bond_primary }}"
         state: present
@@ -177,9 +178,10 @@
     # 5. Attach Slaves to Bond
     - name: Add Slaves to Bond0
       community.general.nmcli:
-        conn_name: "bond-slave-{{ item }}"
+        conn_name: "{{ item }}"
         ifname: "{{ item }}"
         type: ethernet
+        mtu: 9000
         master: bond0
         slave_type: bond
         state: present
@@ -191,7 +193,6 @@
         conn_name: ovirtmgmt
         ifname: ovirtmgmt
         type: bridge
-        mtu: 1500
         stp: false
         ip4: "{{ iface_mgmt_cidr }}/24"
         gw4: "{{ iface_mgmt_gw }}"
@@ -206,6 +207,7 @@
         conn_name: bond0.561
         ifname: bond0.561
         type: vlan
+        mtu: 1500
         vlanid: 561
         vlandev: bond0
         master: ovirtmgmt
