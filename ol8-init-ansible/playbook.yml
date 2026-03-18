@@ -142,6 +142,7 @@
         type: ethernet
         ip4: "{{ iface_conf_cidr }}"
         method4: manual
+        never_default4: true
         state: present
 
     # 4. Create Active-Backup Bond (bond0)
@@ -172,6 +173,7 @@
         ifname: ovirtmgmt
         type: bridge
         mtu: 1500
+        stp: false
         ip4: "{{ iface_mgmt_cidr }}/24"
         gw4: "{{ iface_mgmt_gw }}"
         dns4: "{{ dns_servers.split(' ') }}"
@@ -209,6 +211,7 @@
         conn_name: vmbr0
         ifname: vmbr0
         type: bridge
+        stp: false
         method4: disabled
         method6: disabled
         state: present
@@ -236,6 +239,9 @@
       ansible.builtin.command: "nmcli con up {{ item }}"
       loop:
         - bond0
+        - bond0.561
+        - bond0.562
+        - bond0.563
         - ovirtmgmt
         - vmbr0
       changed_when: true
