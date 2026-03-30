@@ -133,7 +133,7 @@
         conn_name: "bond0.{{ vlan_id_storage }}"
         ifname: "bond0.{{ vlan_id_storage }}"
         type: vlan
-        vlandevice: bond0
+        vlandev: bond0
         vlanid: "{{ vlan_id_storage }}"
         ip4: "{{ iface_vlan_special_cidr }}"
         state: present
@@ -150,7 +150,7 @@
         conn_name: "bond0.{{ vlan_id_bridge }}"
         ifname: "bond0.{{ vlan_id_bridge }}"
         type: vlan
-        vlandevice: bond0
+        vlandev: bond0
         vlanid: "{{ vlan_id_bridge }}"
         master: vmbr0
         slave_type: bridge
