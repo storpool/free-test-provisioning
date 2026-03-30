@@ -92,12 +92,11 @@
       failed_when: false
       changed_when: false
 
-    - name: Remove old kernels (Optional)
-      ansible.builtin.dnf:
-        name: "{{ old_kernels.stdout_lines }}"
-        state: absent
+    - name: Remove old kernels (Optional - Bypassing DNF module)
+      ansible.builtin.command: "dnf remove -y {{ old_kernels.stdout_lines | join(' ') }}"
+      register: dnf_remove_kernels
+      changed_when: "'Nothing to do' not in dnf_remove_kernels.stdout"
       when: old_kernels.stdout_lines | length > 0
-
 
 - name: Configure Network
   hosts: alma8
