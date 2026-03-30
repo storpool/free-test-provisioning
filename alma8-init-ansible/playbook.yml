@@ -4,13 +4,10 @@
   gather_facts: no  # Turn this off temporarily so it doesn't crash immediately
   become: true
   
-  pre_tasks:
+  tasks:
     - name: Install python3 and dependencies for Ansible facts
       raw: dnf install -y python38
       changed_when: false
-
-    - name: Now gather facts
-      setup: # This manually triggers fact gathering after python is verified
 
     - name: Bootstrap python3-dnf
       raw: dnf install -y python3-dnf
