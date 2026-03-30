@@ -70,64 +70,6 @@
 
   tasks:
 
-    - name: Ensure Hostname is set
-      ansible.builtin.hostname:
-        name: "{{ inventory_hostname }}"
-        
-    - name: Add all inventory hosts to /etc/hosts
-      ansible.builtin.blockinfile:
-        path: /etc/hosts
-        marker: "# {mark} ANSIBLE MANAGED BLOCK: CLUSTER NODES"
-        block: |
-          {% for host in groups['all'] %}
-          {{ hostvars[host]['iface_mgmt_cidr'] }} {{ hostvars[host]['inventory_hostname'] }}.{{ dns_search_domain }} {{ hostvars[host]['inventory_hostname'] }}
-          {% endfor %}
-    - name: Generate SSH key for root (if missing)
-      ansible.builtin.user:
-        name: root
-        generate_ssh_key: yes
-        ssh_key_type: ed25519
-
-    - name: Fetch all public keys from nodes
-      ansible.builtin.fetch:
-        src: /root/.ssh/id_ed25519.pub
-        dest: "buffer/{{ inventory_hostname }}-id_ed25519.pub"
-        flat: yes
-      changed_when: false
-
-    - name: Distribute keys to all other nodes
-      ansible.posix.authorized_key:
-        user: root
-        key: "{{ lookup('file', 'buffer/' + item + '-id_ed25519.pub') }}"
-        state: present
-      loop: "{{ groups['proxmox'] }}"
-      when: item != inventory_hostname
-
-    - name: Wait for SSH to become available on all nodes
-      ansible.builtin.wait_for:
-        host: "{{ hostvars[item]['iface_mgmt_cidr'] }}"
-        port: 22
-        state: started
-        timeout: 300  # Will wait up to 5 minutes
-      loop: "{{ groups['proxmox'] }}"
-      when: item != inventory_hostname
-
-    - name: Get SSH fingerprints from nodes
-      ansible.builtin.command: "ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }}"
-      register: remote_keys
-      loop: "{{ groups['proxmox'] }}"
-      when: item != inventory_hostname
-      changed_when: false
-
-    - name: Add fingerprints to known_hosts
-      ansible.builtin.known_hosts:
-        name: "{{ hostvars[item.item]['iface_mgmt_cidr'] }}"
-        key: "{{ item.stdout }}"
-        path: /root/.ssh/known_hosts
-        state: present
-      loop: "{{ remote_keys.results }}"
-      when: item.skipped is not defined and item.stdout != ""
-
     - name: Install specific kernel version
       ansible.builtin.dnf:
         name: "kernel-{{ target_kernel_ver }}"
@@ -211,3 +153,61 @@
         master: vmbr0
         slave_type: bridge
         state: present
+
+    - name: Ensure Hostname is set
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+        
+    - name: Add all inventory hosts to /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED BLOCK: CLUSTER NODES"
+        block: |
+          {% for host in groups['all'] %}
+          {{ hostvars[host]['iface_mgmt_cidr'] }} {{ hostvars[host]['inventory_hostname'] }}.{{ dns_search_domain }} {{ hostvars[host]['inventory_hostname'] }}
+          {% endfor %}
+    - name: Generate SSH key for root (if missing)
+      ansible.builtin.user:
+        name: root
+        generate_ssh_key: yes
+        ssh_key_type: ed25519
+
+    - name: Fetch all public keys from nodes
+      ansible.builtin.fetch:
+        src: /root/.ssh/id_ed25519.pub
+        dest: "buffer/{{ inventory_hostname }}-id_ed25519.pub"
+        flat: yes
+      changed_when: false
+
+    - name: Distribute keys to all other nodes
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ lookup('file', 'buffer/' + item + '-id_ed25519.pub') }}"
+        state: present
+      loop: "{{ groups['proxmox'] }}"
+      when: item != inventory_hostname
+
+    - name: Wait for SSH to become available on all nodes
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[item]['iface_mgmt_cidr'] }}"
+        port: 22
+        state: started
+        timeout: 300  # Will wait up to 5 minutes
+      loop: "{{ groups['proxmox'] }}"
+      when: item != inventory_hostname
+
+    - name: Get SSH fingerprints from nodes
+      ansible.builtin.command: "ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }}"
+      register: remote_keys
+      loop: "{{ groups['proxmox'] }}"
+      when: item != inventory_hostname
+      changed_when: false
+
+    - name: Add fingerprints to known_hosts
+      ansible.builtin.known_hosts:
+        name: "{{ hostvars[item.item]['iface_mgmt_cidr'] }}"
+        key: "{{ item.stdout }}"
+        path: /root/.ssh/known_hosts
+        state: present
+      loop: "{{ remote_keys.results }}"
+      when: item.skipped is not defined and item.stdout != ""
