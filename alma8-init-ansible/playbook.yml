@@ -70,10 +70,10 @@
 
   tasks:
 
-    - name: Install specific kernel version
-      ansible.builtin.dnf:
-        name: "kernel-{{ target_kernel_ver }}"
-        state: present
+    - name: Install specific kernel version (Bypassing DNF module)
+      command: "dnf install -y kernel-{{ sp_kernel_version }} kernel-devel-{{ sp_kernel_version }} kernel-headers-{{ sp_kernel_version }}"
+      register: dnf_kernel
+      changed_when: "'Nothing to do' not in dnf_kernel.stdout"
 
     - name: Set Default Kernel with Grubby
       ansible.builtin.command:
