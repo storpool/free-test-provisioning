@@ -41,10 +41,11 @@
   hosts: alma8
   gather_facts: true
   tasks:
-    - name: Ensure parted and wipefs are installed
-      ansible.builtin.dnf:
-        name: [parted, util-linux]
-        state: present
+
+    - name: Ensure parted and wipefs are installed (Bypassing DNF module)
+      command: dnf install -y parted util-linux
+      register: dnf_parted
+      changed_when: "'Nothing to do' not in dnf_parted.stdout"
 
     - name: Map serial numbers to device paths
       set_fact:
