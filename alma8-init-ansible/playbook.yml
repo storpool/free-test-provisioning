@@ -12,7 +12,6 @@
     - name: Now gather facts
       setup: # This manually triggers fact gathering after python is verified
 
-  tasks:
     - name: Bootstrap python3-dnf
       raw: dnf install -y python3-dnf
       changed_when: false
