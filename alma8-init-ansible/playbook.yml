@@ -1,26 +1,22 @@
 ---
 - name: Initialize AlmaLinux 8
   hosts: alma8
-  gather_facts: no
+  gather_facts: yes
   become: true
   vars:
     ansible_python_interpreter: /usr/bin/python3.8
 
   tasks:
 
-    - name: Bootstrap python3-dnf
-      raw: dnf install -y python38 python3-dnf
-      changed_when: false
+   - name: Install StorPool dependencies via command (bypassing the DNF module)
+      command: dnf install -y epel-release kernel-devel kernel-headers wget curl
+      register: dnf_install
+      changed_when: "'Nothing to do' not in dnf_install.stdout"
 
-    - name: Gather facts now that DNF is ready
-      setup:
-
-    - name: Proceed with StorPool Init tasks
-      dnf:
-        name: 
-          - kernel-devel
-          - tuned-profiles-storpool
-        state: present
+    - name: Update all system packages
+      command: dnf update -y
+      register: dnf_update
+      changed_when: "'Nothing to do' not in dnf_update.stdout"
 
 - name: Configure Alma8 Network (StorPool Demo Layout)
   hosts: alma8
