@@ -71,7 +71,7 @@
   tasks:
 
     - name: Install specific kernel version (Bypassing DNF module)
-      command: "dnf install -y kernel-{{ sp_kernel_version }} kernel-devel-{{ sp_kernel_version }} kernel-headers-{{ sp_kernel_version }}"
+      command: "dnf install -y kernel-{{ target_kernel_ver }} kernel-devel-{{ target_kernel_ver }} kernel-headers-{{ target_kernel_ver }}"
       register: dnf_kernel
       changed_when: "'Nothing to do' not in dnf_kernel.stdout"
 
