@@ -8,7 +8,7 @@
 
   tasks:
 
-   - name: Install StorPool dependencies via command (bypassing the DNF module)
+    - name: Install StorPool dependencies via command (bypassing the DNF module)
       command: dnf install -y epel-release kernel-devel kernel-headers wget curl
       register: dnf_install
       changed_when: "'Nothing to do' not in dnf_install.stdout"
