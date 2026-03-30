@@ -1,19 +1,15 @@
 ---
 - name: Initialize AlmaLinux 8
   hosts: alma8
-  gather_facts: no  # Turn this off temporarily so it doesn't crash immediately
+  gather_facts: no
   become: true
   vars:
-    # Explicitly use the platform-native Python that has DNF modules
-    ansible_python_interpreter: /usr/libexec/platform-python
+    ansible_python_interpreter: /usr/bin/python3.8
 
   tasks:
-#    - name: Install python3 and dependencies for Ansible facts
-#      raw: dnf install -y python38
-#      changed_when: false
 
     - name: Bootstrap python3-dnf
-      raw: dnf install -y python3-dnf
+      raw: dnf install -y python38 python3-dnf
       changed_when: false
 
     - name: Gather facts now that DNF is ready
