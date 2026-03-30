@@ -1,0 +1,193 @@
+---
+- name: Configure Alma8 Network (StorPool Demo Layout)
+  hosts: alma8
+  gather_facts: true
+  serial: 1
+
+  tasks:
+    - name: Set Hostname
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}.{{ dns_search_domain }}"
+
+    - name: Update /etc/hosts for Cluster Resolution
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED BLOCK: CLUSTER NODES"
+        block: |
+          {% for host in groups['all'] %}
+          {{ hostvars[host]['iface_mgmt_cidr'] }} {{ hostvars[host]['inventory_hostname'] }}.{{ dns_search_domain }} {{ hostvars[host]['inventory_hostname'] }}
+          {% endfor %}
+
+- name: 2. Clear StorPool Storage Drives
+  hosts: alma8
+  gather_facts: true
+  tasks:
+    - name: Ensure parted and wipefs are installed
+      ansible.builtin.dnf:
+        name: [parted, util-linux]
+        state: present
+
+    - name: Map serial numbers to device paths
+      set_fact:
+        drives_to_wipe: >-
+          {{
+            ansible_facts.devices | dict2items
+            | selectattr('value.serial', 'defined')
+            | selectattr('value.serial', 'in', sp_nvme_serials)
+            | map(attribute='key')
+            | map('regex_replace', '^', '/dev/')
+            | list
+          }}
+
+    - name: Wipe Partition Tables on matched drives
+      ansible.builtin.command: "wipefs -a {{ item }}"
+      loop: "{{ drives_to_wipe }}"
+      when: drives_to_wipe | length > 0
+
+- name: Install target Kernel
+  hosts: alma8
+  gather_facts: true
+
+  tasks:
+
+    - name: Ensure Hostname is set
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+        
+    - name: Add all inventory hosts to /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED BLOCK: CLUSTER NODES"
+        block: |
+          {% for host in groups['all'] %}
+          {{ hostvars[host]['iface_mgmt_cidr'] }} {{ hostvars[host]['inventory_hostname'] }}.{{ dns_search_domain }} {{ hostvars[host]['inventory_hostname'] }}
+          {% endfor %}
+    - name: Generate SSH key for root (if missing)
+      ansible.builtin.user:
+        name: root
+        generate_ssh_key: yes
+        ssh_key_type: ed25519
+
+    - name: Fetch all public keys from nodes
+      ansible.builtin.fetch:
+        src: /root/.ssh/id_ed25519.pub
+        dest: "buffer/{{ inventory_hostname }}-id_ed25519.pub"
+        flat: yes
+      changed_when: false
+
+    - name: Distribute keys to all other nodes
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ lookup('file', 'buffer/' + item + '-id_ed25519.pub') }}"
+        state: present
+      loop: "{{ groups['proxmox'] }}"
+      when: item != inventory_hostname
+
+    - name: Wait for SSH to become available on all nodes
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[item]['iface_mgmt_cidr'] }}"
+        port: 22
+        state: started
+        timeout: 300  # Will wait up to 5 minutes
+      loop: "{{ groups['proxmox'] }}"
+      when: item != inventory_hostname
+
+    - name: Get SSH fingerprints from nodes
+      ansible.builtin.command: "ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }}"
+      register: remote_keys
+      loop: "{{ groups['proxmox'] }}"
+      when: item != inventory_hostname
+      changed_when: false
+
+    - name: Add fingerprints to known_hosts
+      ansible.builtin.known_hosts:
+        name: "{{ hostvars[item.item]['iface_mgmt_cidr'] }}"
+        key: "{{ item.stdout }}"
+        path: /root/.ssh/known_hosts
+        state: present
+      loop: "{{ remote_keys.results }}"
+      when: item.skipped is not defined and item.stdout != ""
+
+    - name: Install specific kernel version
+      ansible.builtin.dnf:
+        name: "kernel-{{ target_kernel_ver }}"
+        state: present
+
+    - name: Set Default Kernel with Grubby
+      ansible.builtin.command:
+        cmd: "grubby --set-default=/boot/vmlinuz-{{ target_kernel_ver }}.el8.x86_64"
+
+    - name: Reboot to apply changes
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+
+    - name: List old kernels
+      ansible.builtin.shell: rpm -q kernel | grep -v "{{ target_kernel_ver }}"
+      register: old_kernels
+      failed_when: false
+      changed_when: false
+
+    - name: Remove old kernels (Optional)
+      ansible.builtin.dnf:
+        name: "{{ old_kernels.stdout_lines }}"
+        state: absent
+      when: old_kernels.stdout_lines | length > 0
+
+
+- name: Configure Network
+  hosts: alma8
+  gather_facts: true
+#  serial: 1
+
+  tasks:
+    - name: Ensure NetworkManager is running
+      ansible.builtin.service:
+        name: NetworkManager
+        state: started
+        enabled: yes
+
+    - name: Create Active-Backup Bond (bond0)
+      community.general.nmcli:
+        conn_name: bond0
+        ifname: bond0
+        type: bond
+        mode: active-backup
+        primary: "{{ iface_bond_primary }}"
+        state: present
+
+    - name: Add Slaves to Bond
+      community.general.nmcli:
+        conn_name: "bond0-slave-{{ item }}"
+        ifname: "{{ item }}"
+        type: bond-slave
+        master: bond0
+        state: present
+      loop: "{{ iface_bond_slaves.split(' ') }}"
+
+    - name: Create Storage VLAN (bond0.562)
+      community.general.nmcli:
+        conn_name: "bond0.{{ vlan_id_storage }}"
+        ifname: "bond0.{{ vlan_id_storage }}"
+        type: vlan
+        vlandevice: bond0
+        vlanid: "{{ vlan_id_storage }}"
+        ip4: "{{ iface_vlan_special_cidr }}"
+        state: present
+
+    - name: Create Bridge (vmbr0) for VM Traffic
+      community.general.nmcli:
+        conn_name: vmbr0
+        ifname: vmbr0
+        type: bridge
+        state: present
+
+    - name: Create Bridge VLAN Slave (bond0.563)
+      community.general.nmcli:
+        conn_name: "bond0.{{ vlan_id_bridge }}"
+        ifname: "bond0.{{ vlan_id_bridge }}"
+        type: vlan
+        vlandevice: bond0
+        vlanid: "{{ vlan_id_bridge }}"
+        master: vmbr0
+        slave_type: bridge
+        state: present
