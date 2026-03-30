@@ -76,8 +76,11 @@
       changed_when: "'Nothing to do' not in dnf_kernel.stdout"
 
     - name: Set Default Kernel with Grubby
-      ansible.builtin.command:
-        cmd: "grubby --set-default=/boot/vmlinuz-{{ target_kernel_ver }}.el8.x86_64"
+      shell: |
+        KERNEL_PATH=$(ls /boot/vmlinuz-* | grep "{{ target_kernel_ver }}" | head -n 1)
+        grubby --set-default=$KERNEL_PATH
+      register: grubby_result
+      changed_when: grubby_result.rc == 0
 
     - name: Reboot to apply changes
       ansible.builtin.reboot:
