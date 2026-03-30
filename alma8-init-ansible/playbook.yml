@@ -82,9 +82,11 @@
       register: grubby_result
       changed_when: grubby_result.rc == 0
 
-    - name: Reboot to apply changes
+    - name: Reboot to apply the new StorPool kernel
       ansible.builtin.reboot:
+        msg: "Rebooting to load the new kernel"
         reboot_timeout: 300
+      when: target_kernel_ver not in ansible_kernel
 
     - name: List old kernels
       ansible.builtin.shell: rpm -q kernel | grep -v "{{ target_kernel_ver }}"
