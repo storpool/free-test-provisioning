@@ -12,6 +12,21 @@
     - name: Now gather facts
       setup: # This manually triggers fact gathering after python is verified
 
+  tasks:
+    - name: Bootstrap python3-dnf
+      raw: dnf install -y python3-dnf
+      changed_when: false
+
+    - name: Gather facts now that DNF is ready
+      setup:
+
+    - name: Proceed with StorPool Init tasks
+      dnf:
+        name: 
+          - kernel-devel
+          - tuned-profiles-storpool
+        state: present
+
 - name: Configure Alma8 Network (StorPool Demo Layout)
   hosts: alma8
   gather_facts: true
