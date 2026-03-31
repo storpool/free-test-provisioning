@@ -162,7 +162,7 @@
 
     - name: Set advanced ARP bonding options on bond0
       ansible.builtin.command: >
-        nmcli con mod bond0 bond.options "mode=active-backup,arp_interval=500,arp_validate=active,arp_all_targets=any,arp_ip_target={{ groups['oracle_nodes'] | reject('equalto', inventory_hostname) | map('extract', hostvars, 'iface_vlan_special_cidr') | map('regex_replace', '/.*', '') | join(' ') }}"
+        nmcli con mod bond0 bond.options "mode=active-backup,arp_interval=500,arp_validate=active,arp_all_targets=any,arp_ip_target={{ groups['alma8'] | reject('equalto', inventory_hostname) | map('extract', hostvars, 'iface_vlan_special_cidr') | map('regex_replace', '/.*', '') | join(' ') }}"
 
       changed_when: false
 
