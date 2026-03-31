@@ -112,21 +112,67 @@
         state: started
         enabled: yes
 
+    - name: Remove auto-generated default profiles hogging physical NICs
+      community.general.nmcli:
+        conn_name: "{{ item }}"
+        state: absent
+      loop: "{{ iface_bond_slaves.split(' ') }}"
+
+    - name: Configure conf Interface
+      community.general.nmcli:
+        conn_name: "{{ iface_conf }}"
+        ifname: "{{ iface_conf }}"
+        type: ethernet
+        ip4: "{{ iface_conf_cidr }}"
+        method4: manual
+        never_default4: true
+        state: present
+
+    - name: Create Management Bridge (mgmt)
+      community.general.nmcli:
+        conn_name: mgmt
+        ifname: mgmt
+        type: bridge
+        stp: false
+        ip4: "{{ iface_mgmt_cidr }}/24"
+        gw4: "{{ iface_mgmt_gw }}"
+        dns4: "{{ dns_servers.split(' ') }}"
+        dns4_search: "{{ dns_search_domain }}"
+        method4: manual
+        state: present
+
+    - name: Configure mgmt Interface
+      community.general.nmcli:
+        conn_name: "{{ iface_mgmt_phys }}"
+        ifname: "{{ iface_mgmt_phys }}"
+        type: ethernet
+        master: mgmt
+        slave_type: bridge
+        state: present
+
     - name: Create Active-Backup Bond (bond0)
       community.general.nmcli:
         conn_name: bond0
         ifname: bond0
         type: bond
+        mtu: 9000
         mode: active-backup
         primary: "{{ iface_bond_primary }}"
         state: present
 
-    - name: Add Slaves to Bond
+    - name: Set advanced ARP bonding options on bond0
+      ansible.builtin.command: >
+        nmcli con mod bond0 bond.options "mode=active-backup,arp_interval=500,arp_validate=active,arp_all_targets=any,arp_ip_target={{ groups['oracle_nodes'] | reject('equalto', inventory_hostname) | map('extract',
+      changed_when: false
+
+    - name: Add Slaves to Bond0
       community.general.nmcli:
-        conn_name: "bond0-slave-{{ item }}"
+        conn_name: "{{ item }}"
         ifname: "{{ item }}"
-        type: bond-slave
+        type: ethernet
+        mtu: 9000
         master: bond0
+        slave_type: bond
         state: present
       loop: "{{ iface_bond_slaves.split(' ') }}"
 
@@ -158,10 +204,25 @@
         slave_type: bridge
         state: present
 
+    - name: Reload NetworkManager to apply changes
+      ansible.builtin.service:
+        name: NetworkManager
+        state: reloaded
+
+    - name: Bring up master connections
+      ansible.builtin.command: "nmcli con up {{ item }}"
+      loop:
+        - mgmt
+        - bond0
+        - bond0.562
+        - bond0.563
+        - vmbr0
+      changed_when: true
+
     - name: Ensure Hostname is set
       ansible.builtin.hostname:
         name: "{{ inventory_hostname }}"
-        
+
     - name: Add all inventory hosts to /etc/hosts
       ansible.builtin.blockinfile:
         path: /etc/hosts
@@ -188,7 +249,7 @@
         user: root
         key: "{{ lookup('file', 'buffer/' + item + '-id_ed25519.pub') }}"
         state: present
-      loop: "{{ groups['proxmox'] }}"
+      loop: "{{ groups['alma8'] }}"
       when: item != inventory_hostname
 
     - name: Wait for SSH to become available on all nodes
@@ -197,13 +258,13 @@
         port: 22
         state: started
         timeout: 300  # Will wait up to 5 minutes
-      loop: "{{ groups['proxmox'] }}"
+      loop: "{{ groups['alma8'] }}"
       when: item != inventory_hostname
 
     - name: Get SSH fingerprints from nodes
       ansible.builtin.command: "ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }}"
       register: remote_keys
-      loop: "{{ groups['proxmox'] }}"
+      loop: "{{ groups['alma8'] }}"
       when: item != inventory_hostname
       changed_when: false
 
