@@ -192,6 +192,9 @@
         conn_name: vmbr0
         ifname: vmbr0
         type: bridge
+        stp: false
+        method4: disabled
+        method6: disabled
         state: present
 
     - name: Create Bridge VLAN Slave (bond0.563)
