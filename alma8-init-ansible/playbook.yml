@@ -162,7 +162,8 @@
 
     - name: Set advanced ARP bonding options on bond0
       ansible.builtin.command: >
-        nmcli con mod bond0 bond.options "mode=active-backup,arp_interval=500,arp_validate=active,arp_all_targets=any,arp_ip_target={{ groups['oracle_nodes'] | reject('equalto', inventory_hostname) | map('extract',
+        nmcli con mod bond0 bond.options "mode=active-backup,arp_interval=500,arp_validate=active,arp_all_targets=any,arp_ip_target={{ groups['oracle_nodes'] | reject('equalto', inventory_hostname) | map('extract', hostvars, 'iface_vlan_special_cidr') | map('regex_replace', '/.*', '') | join(' ') }}"
+
       changed_when: false
 
     - name: Add Slaves to Bond0
@@ -231,6 +232,7 @@
           {% for host in groups['all'] %}
           {{ hostvars[host]['iface_mgmt_cidr'] }} {{ hostvars[host]['inventory_hostname'] }}.{{ dns_search_domain }} {{ hostvars[host]['inventory_hostname'] }}
           {% endfor %}
+
     - name: Generate SSH key for root (if missing)
       ansible.builtin.user:
         name: root
