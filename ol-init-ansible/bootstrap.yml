@@ -1,0 +1,38 @@
+---
+- name: Bootstrap Oracle Linux 8 and 9 nodes with Python
+  hosts: oracle_nodes
+  # CRITICAL: We must disable fact gathering initially, otherwise Ansible will try to 
+  # run the setup module using potentially missing or broken interpreters.
+  gather_facts: false 
+  become: true # Run as root
+
+  tasks:
+    - name: Detect OS Major Version without Python
+      ansible.builtin.raw: "grep -E '^VERSION_ID=' /etc/os-release | cut -d '\"' -f 2 | cut -d '.' -f 1"
+      register: raw_os_version
+      changed_when: false
+
+    - name: Set OS Major Version fact
+      ansible.builtin.set_fact:
+        os_major_version: "{{ raw_os_version.stdout | trim }}"
+
+    - name: Install Python 3.9 on Oracle Linux 8
+      ansible.builtin.raw: dnf install -y python39
+      register: install_result_8
+      changed_when: "'Nothing to do' not in install_result_8.stdout"
+      when: os_major_version == '8'
+
+    - name: Install Python 3 on Oracle Linux 9 (Defaults to 3.9+)
+      ansible.builtin.raw: dnf install -y python3
+      register: install_result_9
+      changed_when: "'Nothing to do' not in install_result_9.stdout"
+      when: os_major_version == '9'
+
+    - name: Verify Python is installed and accessible
+      ansible.builtin.raw: "python3 --version || /usr/bin/python3.9 --version"
+      register: python_check
+      changed_when: false
+
+    - name: Display the installed Python version
+      ansible.builtin.debug:
+        msg: "Success! Found: {{ python_check.stdout | trim }} on Oracle Linux {{ os_major_version }}"

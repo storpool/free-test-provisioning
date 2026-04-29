@@ -1,0 +1,377 @@
+---
+- name: Install Python 3.9+
+  import_playbook: bootstrap.yml
+
+- name: Configure Oracle Linux System & Network (StorPool Demo Layout)
+  hosts: oracle_nodes
+  gather_facts: true
+#  serial: 1
+
+  tasks:
+
+    # 1. Handle Hostname & Hosts File
+    - name: Check current hostname
+      ansible.builtin.setup:
+        filter: ansible_hostname
+
+    - name: Set fact if rename is required
+      ansible.builtin.set_fact:
+        perform_rename: "{{ ansible_hostname != inventory_hostname ~ '.' ~ dns_search_domain }}"
+
+    - name: Set new Hostname (OS)
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}.{{ dns_search_domain }}"
+      when: perform_rename
+
+    - name: Update /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "^{{ ansible_default_ipv4.address }}"
+        line: "{{ iface_mgmt_cidr }} {{ inventory_hostname }} {{ inventory_hostname }}.{{ dns_search_domain }}"
+        state: present
+      when: perform_rename
+
+    # 2. Network Prerequisites
+    - name: Ensure NetworkManager Python dependencies are installed
+      ansible.builtin.command: dnf install -y NetworkManager-libnm
+      register: dnf_nm
+      changed_when: "'Nothing to do' not in dnf_nm.stdout"
+
+- name: Clear StorPool storage drives
+  hosts: oracle_nodes
+  gather_facts: true
+
+  tasks:
+    - name: Ensure disk management tools are installed
+      ansible.builtin.command: dnf install -y parted gdisk util-linux
+      register: dnf_disk
+      changed_when: "'Nothing to do' not in dnf_disk.stdout"
+
+    - name: Map serial numbers to device paths
+      ansible.builtin.set_fact:
+        drives_to_wipe: >-
+          {{
+            ansible_facts.devices | dict2items
+            | selectattr('value.serial', 'defined')
+            | selectattr('value.serial', 'in', sp_nvme_serials)
+            | map(attribute='key')
+            | map('regex_replace', '^', '/dev/')
+            | list
+          }}
+
+    - name: Debug matched drives
+      ansible.builtin.debug:
+        msg: "Found matches: {{ drives_to_wipe }}"
+
+    - name: Process drives found
+      ansible.builtin.include_tasks: inner_wipe.yml
+      loop: "{{ drives_to_wipe }}"
+      loop_control:
+        loop_var: current_drive
+
+- name: Install target Kernel
+  hosts: oracle_nodes
+  gather_facts: true
+
+  tasks:
+    - name: Fetch StorPool supported kernels JSON
+      ansible.builtin.uri:
+        url: https://vault.storpool.com/supported-kernels-release.json
+        return_content: true
+      register: sp_kernels_json
+      delegate_to: localhost # Only fetch it once from the Ansible controller
+      run_once: true
+
+    - name: Dynamically determine the latest supported UEK kernel for the OS
+      ansible.builtin.set_fact:
+        pin_version: >-
+          {{ 
+             sp_kernels_json.json['ORACLE' ~ ansible_distribution_major_version]['nehalem'] 
+             | dict2items 
+             | map(attribute='value') 
+             | flatten
+             | select('search', 'uek') 
+             | community.general.version_sort 
+             | last 
+          }}
+
+    - name: Debug detected kernel
+      ansible.builtin.debug:
+        msg: "Dynamically selected target kernel: {{ pin_version }}"
+
+    - name: Fail if no matching kernel was found
+      ansible.builtin.fail:
+        msg: "Could not find a supported kernel for Oracle Linux {{ ansible_distribution_major_version }} in the JSON!"
+      when: pin_version | length == 0
+
+    - name: Install the specific kernel version (Core, Modules, and Devel)
+      ansible.builtin.command: >
+        dnf install -y 
+        kernel-uek-core-{{ pin_version }} 
+        kernel-uek-modules-{{ pin_version }} 
+        kernel-uek-devel-{{ pin_version }}
+      register: dnf_kernel
+      changed_when: "'Nothing to do' not in dnf_kernel.stdout"
+
+    - name: Find the exact vmlinuz path for the target kernel
+      ansible.builtin.shell: "ls /boot/vmlinuz*{{ pin_version }}* | head -n 1"
+      register: exact_kernel_path
+      changed_when: false
+      failed_when: exact_kernel_path.stdout == ""
+
+    - name: Debug exact kernel path
+      ansible.builtin.debug:
+        msg: "Found kernel at: {{ exact_kernel_path.stdout }}"
+
+    - name: Pin the kernel using grubby
+      ansible.builtin.command:
+        cmd: "grubby --set-default {{ exact_kernel_path.stdout }}"
+        
+    - name: Get current running kernel
+      ansible.builtin.command: uname -r
+      register: running_kernel
+      changed_when: false
+
+    - name: Reboot to apply new kernel
+      ansible.builtin.reboot:
+        msg: "Rebooting node to switch from {{ running_kernel.stdout }} to {{ pin_version }}"
+        post_reboot_delay: 30
+        reboot_timeout: 240
+      when: running_kernel.stdout != pin_version
+
+    - name: Find ALL other install-only kernel packages (older AND newer)
+      ansible.builtin.shell: >
+        dnf repoquery --installonly --installed | grep -iE '^kernel' | grep -v "{{ pin_version }}"
+      register: kernels_to_remove
+      changed_when: false
+      # grep returns 1 if it finds nothing. We don't want to fail if there are no extra kernels.
+      failed_when: false 
+
+    - name: Explicitly remove all non-active kernels
+      ansible.builtin.command:
+        cmd: "dnf remove -y {{ kernels_to_remove.stdout_lines | join(' ') }}"
+      when: kernels_to_remove.stdout_lines | length > 0
+      register: explicit_kernel_cleanup
+      changed_when: explicit_kernel_cleanup.rc == 0
+
+    - name: Find static rescue files in /boot
+      ansible.builtin.find:
+        paths: /boot
+        patterns: "*rescue*"
+      register: rescue_files
+
+    - name: Remove static rescue kernel and initramfs files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ rescue_files.files }}"
+      when: rescue_files.matched > 0
+      # Provide clean output showing exactly what was deleted
+      loop_control:
+        label: "{{ item.path }}"
+
+- name: Install kvm and ovirt repos
+  hosts: oracle_nodes
+  gather_facts: true # Changed to true so we can capture {{ ansible_distribution_major_version }}
+
+  tasks:
+    - name: Enable baseos_latest repository for the target OS version
+      ansible.builtin.command: "dnf config-manager --enable ol{{ ansible_distribution_major_version }}_baseos_latest"
+      register: repo_enable
+      changed_when: true
+
+    - name: Install Oracle oVirt release 4.5 repository package
+      ansible.builtin.command: "dnf install -y oracle-ovirt-release-45-el{{ ansible_distribution_major_version }}"
+      register: ovirt_repo_install
+      changed_when: "'Nothing to do' not in ovirt_repo_install.stdout"
+
+    - name: Clean DNF cache
+      ansible.builtin.command: dnf clean all
+      changed_when: false
+
+- name: Configure Network with NetworkManager
+  hosts: oracle_nodes
+  gather_facts: true
+#  serial: 1
+
+  tasks:
+    # 0. CLEANUP: Delete default profiles that hijack the interfaces
+    - name: Remove auto-generated default profiles hogging physical NICs
+      community.general.nmcli:
+        conn_name: "{{ item }}"
+        state: absent
+      loop: "{{ iface_bond_slaves.split(' ') }}"
+
+    # 1. Configure conf Interface (SSH)
+    - name: Configure conf Interface
+      community.general.nmcli:
+        conn_name: "{{ iface_conf }}"
+        ifname: "{{ iface_conf }}"
+        type: ethernet
+        ip4: "{{ iface_conf_cidr }}"
+        method4: manual
+        never_default4: true
+        state: present
+
+    # 4. Create Active-Backup Bond (bond0)
+    - name: Create Active-Backup Bond (bond0)
+      community.general.nmcli:
+        conn_name: bond0
+        ifname: bond0
+        type: bond
+        mtu: 9000
+        mode: active-backup
+        primary: "{{ iface_bond_primary }}"
+        state: present
+
+    # 4.5 Apply Advanced ARP Bonding Options
+    - name: Set advanced ARP bonding options on bond0
+      ansible.builtin.command: >
+        nmcli con mod bond0 bond.options "mode=active-backup,arp_interval=500,arp_validate=active,arp_all_targets=any,arp_ip_target={{ groups['oracle_nodes'] | reject('equalto', inventory_hostname) | map('extract', hostvars, 'iface_vlan_special_cidr') | map('regex_replace', '/.*', '') | join(' ') }}"
+      changed_when: false
+
+    # 5. Attach Slaves to Bond
+    - name: Add Slaves to Bond0
+      community.general.nmcli:
+        conn_name: "{{ item }}"
+        ifname: "{{ item }}"
+        type: ethernet
+        mtu: 9000
+        master: bond0
+        slave_type: bond
+        state: present
+      loop: "{{ iface_bond_slaves.split(' ') }}"
+
+    # 2. Create the Management Bridge (ovirtmgmt)
+    - name: Create Management Bridge (ovirtmgmt)
+      community.general.nmcli:
+        conn_name: ovirtmgmt
+        ifname: ovirtmgmt
+        type: bridge
+        stp: false
+        ip4: "{{ iface_mgmt_cidr }}/24"
+        gw4: "{{ iface_mgmt_gw }}"
+        dns4: "{{ dns_servers.split(' ') }}"
+        dns4_search: "{{ dns_search_domain }}"
+        method4: manual
+        state: present
+
+    # . Create VLAN 561 and attach to ovirtmgmt
+    - name: Create VLAN 561 and attach to ovirtmgmt
+      community.general.nmcli:
+        conn_name: bond0.561
+        ifname: bond0.561
+        type: vlan
+        mtu: 1500
+        vlanid: 561
+        vlandev: bond0
+        master: ovirtmgmt
+        slave_type: bridge
+        state: present
+
+    # 6. Create VLAN 562
+    - name: Create VLAN 562 on Bond0
+      community.general.nmcli:
+        conn_name: bond0.562
+        ifname: bond0.562
+        type: vlan
+        vlanid: 562
+        vlandev: bond0
+        ip4: "{{ iface_vlan_special_cidr }}"
+        method4: manual
+        state: present
+
+    # 7. Create Bridge for VLAN 563 (vmbr0)
+    - name: Create Bridge vmbr0
+      community.general.nmcli:
+        conn_name: vmbr0
+        ifname: vmbr0
+        type: bridge
+        stp: false
+        method4: disabled
+        method6: disabled
+        state: present
+
+    # 8. Create VLAN 563 and attach to vmbr0
+    - name: Create VLAN 563 and attach to vmbr0
+      community.general.nmcli:
+        conn_name: bond0.563
+        ifname: bond0.563
+        type: vlan
+        vlanid: 563
+        vlandev: bond0
+        master: vmbr0
+        slave_type: bridge
+        state: present
+
+    # 9. Apply the configuration
+    - name: Reload NetworkManager to apply changes
+      ansible.builtin.service:
+        name: NetworkManager
+        state: reloaded
+
+    # 10. Ensure master connections activate and pull in their freed slaves
+    - name: Bring up master connections
+      ansible.builtin.command: "nmcli con up {{ item }}"
+      loop:
+        - bond0
+        - bond0.561
+        - bond0.562
+        - bond0.563
+        - ovirtmgmt
+        - vmbr0
+      changed_when: true
+
+- name: Configure SSH
+  hosts: oracle_nodes
+  gather_facts: true
+
+  tasks:
+    - name: Add all inventory hosts to /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED BLOCK: CLUSTER NODES"
+        block: |
+          {% for host in groups['oracle_nodes'] %}
+          {{ hostvars[host]['iface_mgmt_cidr'] }} {{ hostvars[host]['inventory_hostname'] }}.{{ dns_search_domain }} {{ hostvars[host]['inventory_hostname'] }}
+          {% endfor %}
+
+    - name: Generate SSH key for root (if missing)
+      ansible.builtin.user:
+        name: root
+        generate_ssh_key: yes
+        ssh_key_type: ed25519
+
+    - name: Fetch all public keys from nodes
+      ansible.builtin.fetch:
+        src: /root/.ssh/id_ed25519.pub
+        dest: "buffer/{{ inventory_hostname }}-id_ed25519.pub"
+        flat: yes
+      changed_when: false
+
+    - name: Distribute keys to all other nodes
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ lookup('file', 'buffer/' + item + '-id_ed25519.pub') }}"
+        state: present
+      loop: "{{ groups['oracle_nodes'] }}"
+      when: item != inventory_hostname
+
+    - name: Get SSH fingerprints from nodes
+      ansible.builtin.command: "ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }}"
+      register: remote_keys
+      loop: "{{ groups['oracle_nodes'] }}"
+      when: item != inventory_hostname
+      changed_when: false
+      retries: 6
+      delay: 5
+      until: remote_keys.rc == 0
+
+    - name: Add fingerprints to known_hosts
+      ansible.builtin.known_hosts:
+        name: "{{ hostvars[item.item]['iface_mgmt_cidr'] }}"
+        key: "{{ item.stdout }}"
+        path: /root/.ssh/known_hosts
+        state: present
+      loop: "{{ remote_keys.results }}"
+      when: item.skipped is not defined and item.stdout != ""

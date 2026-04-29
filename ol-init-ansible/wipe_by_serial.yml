@@ -1,0 +1,39 @@
+---
+- name: Wipe NVMe Drives by Serial Number
+  hosts: oracle_nodes
+  become: true
+  tasks:
+    - name: Ensure disk management tools are installed
+      ansible.builtin.dnf:
+        name: 
+          - parted
+          - gdisk
+          - util-linux
+        state: present
+        
+    - name: Map serial numbers to device paths
+      ansible.builtin.set_fact:
+        drives_to_wipe: >-
+          {{
+            ansible_facts.devices | dict2items
+            | selectattr('value.serial', 'defined')
+            | selectattr('value.serial', 'in', sp_nvme_serials)
+            | map(attribute='key')
+            | map('regex_replace', '^', '/dev/')
+            | list
+          }}
+
+    - name: Debug matched drives
+      ansible.builtin.debug:
+        msg: "Found matches: {{ drives_to_wipe }}"
+
+    - name: Fail if no drives were matched (Safety Check)
+      ansible.builtin.fail:
+        msg: "Could not find drives matching the serials provided!"
+      when: drives_to_wipe | length == 0
+
+    - name: Process drives found
+      ansible.builtin.include_tasks: inner_wipe.yml
+      loop: "{{ drives_to_wipe }}"
+      loop_control:
+        loop_var: current_drive
