@@ -20,7 +20,7 @@
 
     - name: Set new Hostname (OS)
       ansible.builtin.hostname:
-        name: "{{ inventory_hostname }}.{{ dns_search_domain }}"
+        name: "{{ inventory_hostname }}"#.{{ dns_search_domain }}"
       when: perform_rename
 
     - name: Update /etc/hosts
@@ -141,15 +141,14 @@
 
     - name: Find ALL other install-only kernel packages (older AND newer)
       ansible.builtin.shell: >
-        dnf repoquery --installonly --installed | grep -iE '^kernel' | grep -v "{{ pin_version }}"
+        rpm -qa | grep -iE '^kernel' | grep -ivE 'headers|tools' | grep -v "{{ pin_version }}" | grep -v "rescue"
       register: kernels_to_remove
       changed_when: false
-      # grep returns 1 if it finds nothing. We don't want to fail if there are no extra kernels.
       failed_when: false 
 
-    - name: Explicitly remove all non-active kernels
+    - name: Explicitly remove all non-active kernels (Bypassing DNF dependencies)
       ansible.builtin.command:
-        cmd: "dnf remove -y {{ kernels_to_remove.stdout_lines | join(' ') }}"
+        cmd: "rpm -e --nodeps {{ kernels_to_remove.stdout_lines | join(' ') }}"
       when: kernels_to_remove.stdout_lines | length > 0
       register: explicit_kernel_cleanup
       changed_when: explicit_kernel_cleanup.rc == 0
@@ -181,9 +180,10 @@
       changed_when: true
 
     - name: Install Oracle oVirt release 4.5 repository package
-      ansible.builtin.command: "dnf install -y oracle-ovirt-release-45-el{{ ansible_distribution_major_version }}"
-      register: ovirt_repo_install
-      changed_when: "'Nothing to do' not in ovirt_repo_install.stdout"
+      ansible.builtin.dnf:
+        name: "oracle-ovirt-release-45-el{{ ansible_distribution_major_version }}"
+        state: present
+        exclude: "kernel*"
 
     - name: Clean DNF cache
       ansible.builtin.command: dnf clean all
@@ -211,6 +211,44 @@
         ip4: "{{ iface_conf_cidr }}"
         method4: manual
         never_default4: true
+        state: present
+
+    # 2. Create the Management Bridge (ovirtmgmt)
+    - name: Create Management Bridge (ovirtmgmt)
+      community.general.nmcli:
+        conn_name: ovirtmgmt
+        ifname: ovirtmgmt
+        type: bridge
+        stp: false
+        ip4: "{{ iface_mgmt_cidr }}/24"
+        gw4: "{{ iface_mgmt_gw }}"
+        dns4: "{{ dns_servers.split(' ') }}"
+        dns4_search: "{{ dns_search_domain }}"
+        method4: manual
+        state: present
+
+    # . Create VLAN 561 and attach to ovirtmgmt
+    - name: Create VLAN 561 and attach to ovirtmgmt
+      community.general.nmcli:
+        conn_name: "{{iface_mgmt_phys}}.561"
+        ifname: "{{iface_mgmt_phys}}.561"
+        type: vlan
+        mtu: 1500
+        vlanid: 561
+        vlandev: "{{iface_mgmt_phys}}"
+        master: ovirtmgmt
+        slave_type: bridge
+        state: present
+
+    # . Create iscsi VLAN 556
+    - name: Create iSCSI VLAN 556 on sp0
+      community.general.nmcli:
+        conn_name: "{{iface_bond_primary}}.556"
+        ifname: "{{iface_bond_primary}}.556"
+        type: vlan
+        mtu: 9000
+        vlanid: 556
+        vlandev: "{{iface_bond_primary}}"
         state: present
 
     # 4. Create Active-Backup Bond (bond0)
@@ -242,33 +280,6 @@
         state: present
       loop: "{{ iface_bond_slaves.split(' ') }}"
 
-    # 2. Create the Management Bridge (ovirtmgmt)
-    - name: Create Management Bridge (ovirtmgmt)
-      community.general.nmcli:
-        conn_name: ovirtmgmt
-        ifname: ovirtmgmt
-        type: bridge
-        stp: false
-        ip4: "{{ iface_mgmt_cidr }}/24"
-        gw4: "{{ iface_mgmt_gw }}"
-        dns4: "{{ dns_servers.split(' ') }}"
-        dns4_search: "{{ dns_search_domain }}"
-        method4: manual
-        state: present
-
-    # . Create VLAN 561 and attach to ovirtmgmt
-    - name: Create VLAN 561 and attach to ovirtmgmt
-      community.general.nmcli:
-        conn_name: bond0.561
-        ifname: bond0.561
-        type: vlan
-        mtu: 1500
-        vlanid: 561
-        vlandev: bond0
-        master: ovirtmgmt
-        slave_type: bridge
-        state: present
-
     # 6. Create VLAN 562
     - name: Create VLAN 562 on Bond0
       community.general.nmcli:
@@ -281,28 +292,28 @@
         method4: manual
         state: present
 
-    # 7. Create Bridge for VLAN 563 (vmbr0)
-    - name: Create Bridge vmbr0
-      community.general.nmcli:
-        conn_name: vmbr0
-        ifname: vmbr0
-        type: bridge
-        stp: false
-        method4: disabled
-        method6: disabled
-        state: present
-
-    # 8. Create VLAN 563 and attach to vmbr0
-    - name: Create VLAN 563 and attach to vmbr0
-      community.general.nmcli:
-        conn_name: bond0.563
-        ifname: bond0.563
-        type: vlan
-        vlanid: 563
-        vlandev: bond0
-        master: vmbr0
-        slave_type: bridge
-        state: present
+#    # 7. Create Bridge for VLAN 563 (vmbr0)
+#    - name: Create Bridge vmbr0
+#      community.general.nmcli:
+#        conn_name: vmbr0
+#        ifname: vmbr0
+#        type: bridge
+#        stp: false
+#        method4: disabled
+#        method6: disabled
+#        state: present
+#
+#    # 8. Create VLAN 563 and attach to vmbr0
+#    - name: Create VLAN 563 and attach to vmbr0
+#      community.general.nmcli:
+#        conn_name: bond0.563
+#        ifname: bond0.563
+#        type: vlan
+#        vlanid: 563
+#        vlandev: bond0
+#        master: vmbr0
+#        slave_type: bridge
+#        state: present
 
     # 9. Apply the configuration
     - name: Reload NetworkManager to apply changes
@@ -315,11 +326,11 @@
       ansible.builtin.command: "nmcli con up {{ item }}"
       loop:
         - bond0
-        - bond0.561
         - bond0.562
         - bond0.563
+        - "{{iface_mgmt_phys}}.561"
         - ovirtmgmt
-        - vmbr0
+#        - vmbr0
       changed_when: true
 
 - name: Configure SSH
