@@ -201,7 +201,7 @@
         conn_name: "{{ item }}"
         state: absent
 #      loop: "{{ iface_bond_slaves.split(' ') }}"
-      loop: "{{ [iface_bond_primary, iface_bond_secondary] }}"
+      loop: "{{ [iface_bond_primary, iface_bond_secondary, iface_mgmt_phys] }}"
 
     # 1. Configure conf Interface (SSH)
     - name: Configure conf Interface
@@ -228,29 +228,40 @@
         method4: manual
         state: present
 
-    # . Create VLAN 561 and attach to ovirtmgmt
-    - name: Create VLAN 561 and attach to ovirtmgmt
+    # 2.1. Configure mgmt Interface (561 untagged) and attach to ovirtmgmt
+    - name: Configure mgmt Interface and attach to ovirtmgmt
       community.general.nmcli:
-        conn_name: "{{iface_mgmt_phys}}.561"
-        ifname: "{{iface_mgmt_phys}}.561"
-        type: vlan
-        mtu: 1500
-        vlanid: 561
-        vlandev: "{{iface_mgmt_phys}}"
+        conn_name: "{{ iface_mgmt_phys }}"
+        ifname: "{{ iface_mgmt_phys }}"
+        type: ethernet
         master: ovirtmgmt
         slave_type: bridge
         state: present
 
+
+    # . Create VLAN 561 and attach to ovirtmgmt
+#    - name: Create VLAN 561 and attach to ovirtmgmt
+#      community.general.nmcli:
+#        conn_name: "{{iface_mgmt_phys}}.561"
+#        ifname: "{{iface_mgmt_phys}}.561"
+#        type: ehernet
+#        mtu: 1500
+#        vlanid: 561
+#        vlandev: "{{iface_mgmt_phys}}"
+#        master: ovirtmgmt
+#        slave_type: bridge
+#        state: present
+
     # . Create VLAN 563
-    - name: Create VLAN 563
-      community.general.nmcli:
-        conn_name: "{{iface_mgmt_phys}}.563"
-        ifname: "{{iface_mgmt_phys}}.563"
-        type: vlan
-        mtu: 1500
-        vlanid: 563
-        vlandev: "{{iface_mgmt_phys}}"
-        state: present
+#    - name: Create VLAN 563
+#      community.general.nmcli:
+#        conn_name: "{{iface_mgmt_phys}}.563"
+#        ifname: "{{iface_mgmt_phys}}.563"
+#        type: vlan
+#        mtu: 1500
+#        vlanid: 563
+#        vlandev: "{{iface_mgmt_phys}}"
+#        state: present
 
     # . Create iscsi VLAN 556
     - name: Create iSCSI VLAN 556 on sp0
@@ -310,7 +321,8 @@
         ifname: brsp
         type: bridge
         stp: false
-        method4: disabled
+        ip4: "{{ iface_vlan_special_cidr }}"
+        method4: manual
         method6: disabled
         state: present
 
@@ -322,8 +334,6 @@
         type: vlan
         vlanid: 562
         vlandev: bond0
-        ip4: "{{ iface_vlan_special_cidr }}"
-        method4: manual
         master: brsp
         slave_type: bridge
         state: present
@@ -364,9 +374,11 @@
         - bond0
         - bond0.562
 #        - bond0.563
-        - "{{iface_mgmt_phys}}.561"
+        - "{{iface_mgmt_phys}}"
         - ovirtmgmt
         - brsp
+#        - sp0.556
+#        - sp1.557
       changed_when: true
 
 - name: Configure SSH
