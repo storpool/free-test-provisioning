@@ -22,11 +22,20 @@
       changed_when: "'Nothing to do' not in install_result_8.stdout"
       when: os_major_version == '8'
 
+    - name: Check if Python 3 is already installed on Oracle Linux 9
+      ansible.builtin.raw: command -v python3
+      register: python_check_9
+      changed_when: false
+      failed_when: false
+      when: os_major_version == '9'
+
     - name: Install Python 3 on Oracle Linux 9 (Defaults to 3.9+)
       ansible.builtin.raw: dnf install -y python3
       register: install_result_9
       changed_when: "'Nothing to do' not in install_result_9.stdout"
-      when: os_major_version == '9'
+      when: 
+        - os_major_version == '9'
+        - python_check_9.rc != 0
 
     - name: Verify Python is installed and accessible
       ansible.builtin.raw: "python3 --version || /usr/bin/python3.9 --version"

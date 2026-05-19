@@ -272,7 +272,15 @@
         mtu: 9000
         vlanid: 556
         vlandev: "{{iface_bond_primary}}"
+        method4: disabled
+        method6: disabled
         state: present
+
+    - name: Set custom MAC address for VLAN 556
+      ansible.builtin.command: >
+        nmcli connection modify "{{iface_bond_primary}}.556" ethernet.cloned-mac-address "{{iscsi1_vlan_mac}}"
+      changed_when: false
+      when: iscsi1_vlan_mac is defined and iscsi1_vlan_mac | length > 0
 
     # . Create iscsi VLAN 557
     - name: Create iSCSI VLAN 557 on sp1
@@ -283,7 +291,15 @@
         mtu: 9000
         vlanid: 557
         vlandev: "{{iface_bond_secondary}}"
+        method4: disabled
+        method6: disabled
         state: present
+
+    - name: Set custom MAC address for VLAN 557
+      ansible.builtin.command: >
+        nmcli connection modify "{{iface_bond_secondary}}.557" ethernet.cloned-mac-address "{{iscsi2_vlan_mac}}"
+      changed_when: false
+      when: iscsi2_vlan_mac is defined and iscsi2_vlan_mac | length > 0
 
     # 4. Create Active-Backup Bond (bond0)
     - name: Create Active-Backup Bond (bond0)
@@ -377,8 +393,8 @@
         - "{{iface_mgmt_phys}}"
         - ovirtmgmt
         - brsp
-#        - sp0.556
-#        - sp1.557
+        - "{{iface_bond_primary}}.556"
+        - "{{iface_bond_secondary}}.557"
       changed_when: true
 
 - name: Configure SSH
