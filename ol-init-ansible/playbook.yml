@@ -69,6 +69,31 @@
       loop_control:
         loop_var: current_drive
 
+- name: Set up iSCSI initiators
+  hosts: oracle_nodes
+  gather_facts: false # Facts aren't strictly needed for these specific tasks
+
+  tasks:
+    - name: Install iSCSI initiator utilities
+      ansible.builtin.dnf:
+        name: iscsi-initiator-utils
+        state: present
+
+    - name: Define dynamic initiator IQN
+      ansible.builtin.copy:
+        dest: /etc/iscsi/initiatorname.iscsi
+        content: "InitiatorName=iqn.2011-11.com.storpool:{{ inventory_hostname.split('.') | first }}\n"
+        mode: '0644'
+      register: iqn_config
+
+    - name: Enable and Restart iscsid service
+      ansible.builtin.systemd:
+        name: iscsid
+        state: restarted
+        enabled: true
+      # Only restart the service if the IQN file was actually changed/created
+      when: iqn_config.changed
+
 - name: Install target Kernel
   hosts: oracle_nodes
   gather_facts: true
@@ -170,24 +195,24 @@
       loop_control:
         label: "{{ item.path }}"
 
-- name: Install kvm and ovirt repos
-  hosts: oracle_nodes
-  gather_facts: true # Changed to true so we can capture {{ ansible_distribution_major_version }}
+#- name: Install kvm and ovirt repos
+#  hosts: oracle_nodes
+#  gather_facts: true # Changed to true so we can capture {{ ansible_distribution_major_version }}
 
-  tasks:
-    - name: Enable baseos_latest repository for the target OS version
-      ansible.builtin.command: "dnf config-manager --enable ol{{ ansible_distribution_major_version }}_baseos_latest"
-      register: repo_enable
-      changed_when: true
+#  tasks:
+#    - name: Enable baseos_latest repository for the target OS version
+#      ansible.builtin.command: "dnf config-manager --enable ol{{ ansible_distribution_major_version }}_baseos_latest"
+#      register: repo_enable
+#      changed_when: true
 
-    - name: Install Oracle oVirt release 4.5 repository package
-      ansible.builtin.dnf:
-        name: "oracle-ovirt-release-45-el{{ ansible_distribution_major_version }}"
-        state: present
+#    - name: Install Oracle oVirt release 4.5 repository package
+#      ansible.builtin.dnf:
+#        name: "oracle-ovirt-release-45-el{{ ansible_distribution_major_version }}"
+#        state: present
 
-    - name: Clean DNF cache
-      ansible.builtin.command: dnf clean all
-      changed_when: false
+#    - name: Clean DNF cache
+#      ansible.builtin.command: dnf clean all
+#      changed_when: false
 
 - name: Configure Network with NetworkManager
   hosts: oracle_nodes
@@ -200,8 +225,7 @@
       community.general.nmcli:
         conn_name: "{{ item }}"
         state: absent
-#      loop: "{{ iface_bond_slaves.split(' ') }}"
-      loop: "{{ [iface_bond_primary, iface_bond_secondary, iface_mgmt_phys] }}"
+      loop: "{{ [iface_bond_primary, iface_bond_secondary, iface_mgmt_phys, iface_iscsi_primary, iface_iscsi_secondary ] }}"
 
     # 1. Configure conf Interface (SSH)
     - name: Configure conf Interface
@@ -212,94 +236,51 @@
         ip4: "{{ iface_conf_cidr }}"
         method4: manual
         never_default4: true
+        method6: disabled
         state: present
 
-    # 2. Create the Management Bridge (ovirtmgmt)
-    - name: Create Management Bridge (ovirtmgmt)
-      community.general.nmcli:
-        conn_name: ovirtmgmt
-        ifname: ovirtmgmt
-        type: bridge
-        stp: false
-        ip4: "{{ iface_mgmt_cidr }}/24"
-        gw4: "{{ iface_mgmt_gw }}"
-        dns4: "{{ dns_servers.split(' ') }}"
-        dns4_search: "{{ dns_search_domain }}"
-        method4: manual
-        state: present
-
-    # 2.1. Configure mgmt Interface (561 untagged) and attach to ovirtmgmt
-    - name: Configure mgmt Interface and attach to ovirtmgmt
+    # 2.1. Configure mgmt Interface (561 untagged)
+    - name: Configure mgmt Interface
       community.general.nmcli:
         conn_name: "{{ iface_mgmt_phys }}"
         ifname: "{{ iface_mgmt_phys }}"
         type: ethernet
-        master: ovirtmgmt
-        slave_type: bridge
+        stp: false
+        ip4: "{{ iface_mgmt_cidr }}/24"
+        gw4: "{{ iface_mgmt_gw }}"
+        dns4: "{{ dns_servers.split(' ') }}"
+        dns4_search: "{{ dns_search_domain.split(' ') }}"
+        method4: manual
+        method6: disabled
         state: present
-
-
-    # . Create VLAN 561 and attach to ovirtmgmt
-#    - name: Create VLAN 561 and attach to ovirtmgmt
-#      community.general.nmcli:
-#        conn_name: "{{iface_mgmt_phys}}.561"
-#        ifname: "{{iface_mgmt_phys}}.561"
-#        type: ehernet
-#        mtu: 1500
-#        vlanid: 561
-#        vlandev: "{{iface_mgmt_phys}}"
-#        master: ovirtmgmt
-#        slave_type: bridge
-#        state: present
-
-    # . Create VLAN 563
-#    - name: Create VLAN 563
-#      community.general.nmcli:
-#        conn_name: "{{iface_mgmt_phys}}.563"
-#        ifname: "{{iface_mgmt_phys}}.563"
-#        type: vlan
-#        mtu: 1500
-#        vlanid: 563
-#        vlandev: "{{iface_mgmt_phys}}"
-#        state: present
 
     # . Create iscsi VLAN 556
-    - name: Create iSCSI VLAN 556 on sp0
+    - name: Create iSCSI VLAN 556 on iscsi1
       community.general.nmcli:
-        conn_name: "{{iface_bond_primary}}.556"
-        ifname: "sp0.556"
+        conn_name: "{{iface_iscsi_primary}}.{{ vlan_iscsi1 }}"
+        ifname: "{{ iface_iscsi_primary }}.{{ vlan_iscsi1 }}"
         type: vlan
         mtu: 9000
-        vlanid: 556
-        vlandev: "{{iface_bond_primary}}"
-        method4: disabled
+        vlanid: "{{ vlan_iscsi1 }}"
+        vlandev: "{{iface_iscsi_primary}}"
+        ip4: "{{ iscsi1_cidr }}"
+        method4: manual
         method6: disabled
         state: present
-
-    - name: Set custom MAC address for VLAN 556
-      ansible.builtin.command: >
-        nmcli connection modify "{{iface_bond_primary}}.556" ethernet.cloned-mac-address "{{iscsi1_vlan_mac}}"
-      changed_when: false
-      when: iscsi1_vlan_mac is defined and iscsi1_vlan_mac | length > 0
 
     # . Create iscsi VLAN 557
-    - name: Create iSCSI VLAN 557 on sp1
+    - name: Create iSCSI VLAN 557 on iscsi2
       community.general.nmcli:
-        conn_name: "{{iface_bond_secondary}}.557"
-        ifname: "sp1.557"
+        conn_name: "{{iface_iscsi_secondary}}.{{ vlan_iscsi2 }}"
+        ifname: "{{iface_iscsi_secondary}}.{{ vlan_iscsi2 }}"
         type: vlan
         mtu: 9000
-        vlanid: 557
-        vlandev: "{{iface_bond_secondary}}"
-        method4: disabled
+        vlanid: "{{ vlan_iscsi2 }}"
+        vlandev: "{{iface_iscsi_secondary}}"
+        ip4: "{{ iscsi2_cidr }}"
+        method4: manual
         method6: disabled
         state: present
-
-    - name: Set custom MAC address for VLAN 557
-      ansible.builtin.command: >
-        nmcli connection modify "{{iface_bond_secondary}}.557" ethernet.cloned-mac-address "{{iscsi2_vlan_mac}}"
-      changed_when: false
-      when: iscsi2_vlan_mac is defined and iscsi2_vlan_mac | length > 0
 
     # 4. Create Active-Backup Bond (bond0)
     - name: Create Active-Backup Bond (bond0)
@@ -310,6 +291,8 @@
         mtu: 9000
         mode: active-backup
         primary: "{{ iface_bond_primary }}"
+        method4: disabled
+        method6: disabled
         state: present
 
     # 4.5 Apply Advanced ARP Bonding Options
@@ -330,52 +313,20 @@
         state: present
       loop: "{{ [iface_bond_primary, iface_bond_secondary] }}"
 
-    # . Create Bridge for VLAN 562 (brsp)
-    - name: Create Bridge brsp
+    # 6. Create VLAN 562
+    - name: Create VLAN 562 on Bond0
       community.general.nmcli:
-        conn_name: brsp
-        ifname: brsp
-        type: bridge
+        conn_name: bond0.{{ vlan_sp }}
+        ifname: bond0.{{ vlan_sp }}
+        type: vlan
+        vlanid: "{{ vlan_sp }}"
+        vlandev: bond0
         stp: false
         ip4: "{{ iface_vlan_special_cidr }}"
         method4: manual
         method6: disabled
+        zone: trusted
         state: present
-
-    # 6. Create VLAN 562
-    - name: Create VLAN 562 on Bond0
-      community.general.nmcli:
-        conn_name: bond0.562
-        ifname: bond0.562
-        type: vlan
-        vlanid: 562
-        vlandev: bond0
-        master: brsp
-        slave_type: bridge
-        state: present
-
-#    # 7. Create Bridge for VLAN 563 (vmbr0)
-#    - name: Create Bridge vmbr0
-#      community.general.nmcli:
-#        conn_name: vmbr0
-#        ifname: vmbr0
-#        type: bridge
-#        stp: false
-#        method4: disabled
-#        method6: disabled
-#        state: present
-#
-#    # 8. Create VLAN 563 and attach to vmbr0
-#    - name: Create VLAN 563 and attach to vmbr0
-#      community.general.nmcli:
-#        conn_name: bond0.563
-#        ifname: bond0.563
-#        type: vlan
-#        vlanid: 563
-#        vlandev: bond0
-#        master: vmbr0
-#        slave_type: bridge
-#        state: present
 
     # 9. Apply the configuration
     - name: Reload NetworkManager to apply changes
@@ -388,14 +339,31 @@
       ansible.builtin.command: "nmcli con up {{ item }}"
       loop:
         - bond0
-        - bond0.562
-#        - bond0.563
+        - bond0.{{ vlan_sp }}
         - "{{iface_mgmt_phys}}"
-        - ovirtmgmt
-        - brsp
-        - "{{iface_bond_primary}}.556"
-        - "{{iface_bond_secondary}}.557"
+#        - ovirtmgmt
+        - "{{iface_iscsi_primary}}.{{ vlan_iscsi1 }}"
+        - "{{iface_iscsi_secondary}}.{{ vlan_iscsi2 }}"
       changed_when: true
+
+    - name: Ensure firewalld package is installed
+      ansible.builtin.dnf:
+        name: firewalld
+        state: present
+
+    - name: Ensure firewalld is enabled and running
+      ansible.builtin.systemd:
+        name: firewalld
+        state: started
+        enabled: true
+
+    - name: Prevent NetworkManager from automatically creating default connections
+      ansible.builtin.copy:
+        dest: /etc/NetworkManager/conf.d/90-no-auto-default.conf
+        content: |
+          [main]
+          no-auto-default=*
+        mode: '0644'
 
 - name: Configure SSH
   hosts: oracle_nodes
