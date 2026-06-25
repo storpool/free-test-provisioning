@@ -1,0 +1,272 @@
+---
+- name: Install Python 3 & Dependencies
+  import_playbook: bootstrap.yml
+
+- name: Configure Ubuntu System & Network (StorPool Demo Layout)
+  hosts: ubuntu_nodes
+  gather_facts: true
+
+  tasks:
+    # 1. Handle Hostname & Hosts File
+    - name: Check current hostname
+      ansible.builtin.setup:
+        filter: ansible_hostname
+
+    - name: Set fact if rename is required
+      ansible.builtin.set_fact:
+        perform_rename: "{{ ansible_hostname != inventory_hostname ~ '.' ~ dns_search_domain }}"
+
+    - name: Set new Hostname (OS)
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+      when: perform_rename
+
+    - name: Update /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "^{{ ansible_default_ipv4.address }}"
+        line: "{{ iface_mgmt_cidr }} {{ inventory_hostname }} {{ inventory_hostname }}.{{ dns_search_domain }}"
+        state: present
+      when: perform_rename
+
+    # 2. Network Prerequisites
+    - name: Ensure NetworkManager is installed on Ubuntu
+      ansible.builtin.apt:
+        name: network-manager
+        state: present
+        update_cache: yes
+
+- name: Clear StorPool storage drives
+  hosts: ubuntu_nodes
+  gather_facts: true
+
+  tasks:
+    - name: Ensure disk management tools are installed
+      ansible.builtin.apt:
+        name: 
+          - parted
+          - gdisk
+          - util-linux
+        state: present
+
+    - name: Map serial numbers to device paths
+      ansible.builtin.set_fact:
+        drives_to_wipe: >-
+          {{
+            ansible_facts.devices | dict2items
+            | selectattr('value.serial', 'defined')
+            | selectattr('value.serial', 'in', sp_nvme_serials)
+            | map(attribute='key')
+            | map('regex_replace', '^', '/dev/')
+            | list
+          }}
+
+    - name: Debug matched drives
+      ansible.builtin.debug:
+        msg: "Found matches: {{ drives_to_wipe }}"
+
+    - name: Process drives found
+      ansible.builtin.include_tasks: inner_wipe.yml
+      loop: "{{ drives_to_wipe }}"
+      loop_control:
+        loop_var: current_drive
+
+- name: Update Ubuntu Kernel
+  hosts: ubuntu_nodes
+  gather_facts: true
+
+  tasks:
+    - name: Install latest generic Ubuntu kernel
+      ansible.builtin.apt:
+        name: linux-image-generic
+        state: latest
+      register: apt_kernel
+
+    - name: Check if a reboot is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required_file
+
+    - name: Reboot to apply new kernel
+      ansible.builtin.reboot:
+        msg: "Rebooting node to apply new kernel updates"
+        post_reboot_delay: 30
+        reboot_timeout: 240
+      when: reboot_required_file.stat.exists
+
+    - name: Autoremove old unused kernels
+      ansible.builtin.apt:
+        autoremove: yes
+        purge: yes
+
+- name: Configure Network with NetworkManager
+  hosts: ubuntu_nodes
+  gather_facts: true
+
+  tasks:
+    # 0. CLEANUP: Delete default profiles that hijack the interfaces
+    - name: Remove auto-generated default profiles hogging physical NICs
+      community.general.nmcli:
+        conn_name: "{{ item }}"
+        state: absent
+      loop: "{{ [iface_bond_primary, iface_bond_secondary, iface_mgmt_phys] }}"
+
+    # 1. Configure conf Interface (SSH)
+    - name: Configure conf Interface
+      community.general.nmcli:
+        conn_name: "{{ iface_conf }}"
+        ifname: "{{ iface_conf }}"
+        type: ethernet
+        ip4: "{{ iface_conf_cidr }}"
+        method4: manual
+        never_default4: true
+        method6: disabled
+        state: present
+
+    # 2. Configure mgmt Interface (561 untagged)
+    - name: Configure mgmt Interface
+      community.general.nmcli:
+        conn_name: "{{ iface_mgmt_phys }}"
+        ifname: "{{ iface_mgmt_phys }}"
+        type: ethernet
+        stp: false
+        ip4: "{{ iface_mgmt_cidr }}/24"
+        gw4: "{{ iface_mgmt_gw }}"
+        dns4: "{{ dns_servers.split(' ') }}"
+        dns4_search: "{{ dns_search_domain.split(' ') }}"
+        method4: manual
+        method6: disabled
+        state: present
+
+    # 3. Create Active-Backup Bond (bond0)
+    - name: Create Active-Backup Bond (bond0)
+      community.general.nmcli:
+        conn_name: bond0
+        ifname: bond0
+        type: bond
+        mtu: 9000
+        mode: active-backup
+        primary: "{{ iface_bond_primary }}"
+        method4: disabled
+        method6: disabled
+        state: present
+
+    # 3.5 Apply Advanced ARP Bonding Options
+    - name: Set advanced ARP bonding options on bond0
+      ansible.builtin.command: >
+        nmcli con mod bond0 bond.options "mode=active-backup,arp_interval=500,arp_validate=active,arp_all_targets=any,arp_ip_target={{ groups['ubuntu_nodes'] | reject('equalto', inventory_hostname) | map('extract', hostvars, 'iface_vlan_special_cidr') | map('regex_replace', '/.*', '') | join(' ') }}"
+      changed_when: false
+
+    # 4. Attach Slaves to Bond
+    - name: Add Slaves to Bond0
+      community.general.nmcli:
+        conn_name: "{{ item }}"
+        ifname: "{{ item }}"
+        type: ethernet
+        mtu: 9000
+        master: bond0
+        slave_type: bond
+        state: present
+      loop: "{{ [iface_bond_primary, iface_bond_secondary] }}"
+
+    # 5. Create VLAN 562
+    - name: Create VLAN 562 on Bond0
+      community.general.nmcli:
+        conn_name: bond0.{{ vlan_sp }}
+        ifname: bond0.{{ vlan_sp }}
+        type: vlan
+        vlanid: "{{ vlan_sp }}"
+        vlandev: bond0
+        stp: false
+        ip4: "{{ iface_vlan_special_cidr }}"
+        method4: manual
+        method6: disabled
+        zone: trusted
+        state: present
+
+    # 6. Apply the configuration
+    - name: Reload NetworkManager to apply changes
+      ansible.builtin.service:
+        name: NetworkManager
+        state: reloaded
+
+    # 7. Ensure master connections activate and pull in their freed slaves
+    - name: Bring up master connections
+      ansible.builtin.command: "nmcli con up {{ item }}"
+      loop:
+        - bond0
+        - bond0.{{ vlan_sp }}
+        - "{{ iface_mgmt_phys }}"
+      changed_when: true
+
+    - name: Ensure UFW firewall is installed
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+
+    - name: Ensure UFW is enabled
+      community.general.ufw:
+        state: enabled
+        policy: allow # Adjust default policy based on your security needs
+
+    - name: Prevent NetworkManager from automatically creating default connections
+      ansible.builtin.copy:
+        dest: /etc/NetworkManager/conf.d/90-no-auto-default.conf
+        content: |
+          [main]
+          no-auto-default=*
+        mode: '0644'
+
+- name: Configure SSH
+  hosts: ubuntu_nodes
+  gather_facts: true
+
+  tasks:
+    - name: Add all inventory hosts to /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED BLOCK: CLUSTER NODES"
+        block: |
+          {% for host in groups['ubuntu_nodes'] %}
+          {{ hostvars[host]['iface_mgmt_cidr'] }} {{ hostvars[host]['inventory_hostname'] }}.{{ dns_search_domain }} {{ hostvars[host]['inventory_hostname'] }}
+          {% endfor %}
+
+    - name: Generate SSH key for root (if missing)
+      ansible.builtin.user:
+        name: root
+        generate_ssh_key: yes
+        ssh_key_type: ed25519
+
+    - name: Fetch all public keys from nodes
+      ansible.builtin.fetch:
+        src: /root/.ssh/id_ed25519.pub
+        dest: "buffer/{{ inventory_hostname }}-id_ed25519.pub"
+        flat: yes
+      changed_when: false
+
+    - name: Distribute keys to all other nodes
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ lookup('file', 'buffer/' + item + '-id_ed25519.pub') }}"
+        state: present
+      loop: "{{ groups['ubuntu_nodes'] }}"
+      when: item != inventory_hostname
+
+    - name: Get SSH fingerprints from nodes
+      ansible.builtin.command: "ssh-keyscan -H {{ hostvars[item]['iface_mgmt_cidr'] }}"
+      register: remote_keys
+      loop: "{{ groups['ubuntu_nodes'] }}"
+      when: item != inventory_hostname
+      changed_when: false
+      retries: 6
+      delay: 5
+      until: remote_keys.rc == 0
+
+    - name: Add fingerprints to known_hosts
+      ansible.builtin.known_hosts:
+        name: "{{ hostvars[item.item]['iface_mgmt_cidr'] }}"
+        key: "{{ item.stdout }}"
+        path: /root/.ssh/known_hosts
+        state: present
+      loop: "{{ remote_keys.results }}"
+      when: item.skipped is not defined and item.stdout != ""

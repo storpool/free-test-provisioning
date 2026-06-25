@@ -1,0 +1,21 @@
+---
+- name: Bootstrap Ubuntu nodes with Python
+  hosts: ubuntu_nodes
+  # CRITICAL: Disable fact gathering initially to prevent interpreter failures
+  gather_facts: false 
+  become: true 
+
+  tasks:
+    - name: Update apt cache and install Python 3 + python3-apt
+      ansible.builtin.raw: apt-get update && apt-get install -y python3 python3-apt
+      register: apt_result
+      changed_when: "'0 upgraded, 0 newly installed' not in apt_result.stdout"
+
+    - name: Verify Python is installed and accessible
+      ansible.builtin.raw: python3 --version
+      register: python_check
+      changed_when: false
+
+    - name: Display the installed Python version
+      ansible.builtin.debug:
+        msg: "Success! Found: {{ python_check.stdout | trim }} on Ubuntu."
