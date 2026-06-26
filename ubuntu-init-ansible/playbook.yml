@@ -76,10 +76,45 @@
   gather_facts: true
 
   tasks:
-    - name: Install latest generic Ubuntu kernel
+    - name: Fetch StorPool supported kernels JSON
+      ansible.builtin.uri:
+        url: https://vault.storpool.com/supported-kernels-release.json
+        return_content: true
+      register: sp_kernels_json
+      delegate_to: localhost # Fetch only once from the Ansible controller
+      run_once: true
+
+    - name: Dynamically determine the latest supported Ubuntu kernel for the OS
+      ansible.builtin.set_fact:
+        # Assumes JSON key format is like UBUNTU2204 or UBUNTU2004
+        pin_version: >-
+          {{ 
+             sp_kernels_json.json['UBUNTU' ~ (ansible_distribution_version | replace('.', ''))]['nehalem'] 
+             | dict2items 
+             | map(attribute='value') 
+             | flatten
+             | select('search', 'generic') 
+             | community.general.version_sort 
+             | last 
+          }}
+
+    - name: Debug detected kernel
+      ansible.builtin.debug:
+        msg: "Dynamically selected target kernel: {{ pin_version }}"
+
+    - name: Fail if no matching kernel was found
+      ansible.builtin.fail:
+        msg: "Could not find a supported kernel for Ubuntu {{ ansible_distribution_version }} in the JSON!"
+      when: pin_version | length == 0
+
+    - name: Install the specific kernel version
       ansible.builtin.apt:
-        name: linux-image-generic
-        state: latest
+        name: 
+          - "linux-image-{{ pin_version }}"
+          - "linux-headers-{{ pin_version }}"
+          - "linux-modules-extra-{{ pin_version }}"
+        state: present
+        update_cache: yes
       register: apt_kernel
 
     - name: Check if a reboot is required
@@ -87,12 +122,17 @@
         path: /var/run/reboot-required
       register: reboot_required_file
 
+    - name: Get current running kernel
+      ansible.builtin.command: uname -r
+      register: running_kernel
+      changed_when: false
+
     - name: Reboot to apply new kernel
       ansible.builtin.reboot:
-        msg: "Rebooting node to apply new kernel updates"
+        msg: "Rebooting node to switch from {{ running_kernel.stdout }} to {{ pin_version }}"
         post_reboot_delay: 30
         reboot_timeout: 240
-      when: reboot_required_file.stat.exists
+      when: reboot_required_file.stat.exists and running_kernel.stdout != pin_version
 
     - name: Autoremove old unused kernels
       ansible.builtin.apt:
@@ -104,6 +144,41 @@
   gather_facts: true
 
   tasks:
+    - name: Delegate network management from Netplan to NetworkManager
+      ansible.builtin.copy:
+        dest: /etc/netplan/01-network-manager-all.yaml
+        content: |
+          network:
+            version: 2
+            renderer: NetworkManager
+        mode: '0644'
+
+    - name: Override Ubuntu Server default preventing NM from managing ethernet
+      ansible.builtin.file:
+        path: /etc/NetworkManager/conf.d/10-globally-managed-devices.conf
+        state: touch
+        mode: '0644'
+
+    - name: Apply Netplan and restart NetworkManager (Expect Disconnect)
+      ansible.builtin.shell: sleep 3; netplan apply && systemctl restart NetworkManager
+      async: 60  # Let the task run in the background for up to 60 seconds
+      poll: 0    # Fire and forget; do not wait for a response right now
+
+    - name: Wait for network connection to restore
+      ansible.builtin.wait_for_connection:
+        delay: 10      # Wait 10 seconds before polling
+        timeout: 120   # Give up if the node isn't back in 2 minutes
+
+    - name: Ensure ifupdown interfaces are managed by NetworkManager
+      ansible.builtin.lineinfile:
+        path: /etc/NetworkManager/NetworkManager.conf
+        regexp: '^managed='
+        line: 'managed=true'
+        insertafter: '^\[ifupdown\]'
+
+    - name: Apply Netplan and restart NetworkManager
+      ansible.builtin.shell: netplan apply && systemctl restart NetworkManager
+
     # 0. CLEANUP: Delete default profiles that hijack the interfaces
     - name: Remove auto-generated default profiles hogging physical NICs
       community.general.nmcli:
@@ -123,12 +198,12 @@
         method6: disabled
         state: present
 
-    # 2. Configure mgmt Interface (561 untagged)
-    - name: Configure mgmt Interface
+    # 2.1 Create cloudbr0 (Management Bridge)
+    - name: Create management bridge (cloudbr0)
       community.general.nmcli:
-        conn_name: "{{ iface_mgmt_phys }}"
-        ifname: "{{ iface_mgmt_phys }}"
-        type: ethernet
+        conn_name: cloudbr0
+        ifname: cloudbr0
+        type: bridge
         stp: false
         ip4: "{{ iface_mgmt_cidr }}/24"
         gw4: "{{ iface_mgmt_gw }}"
@@ -136,6 +211,16 @@
         dns4_search: "{{ dns_search_domain.split(' ') }}"
         method4: manual
         method6: disabled
+        state: present
+
+    # 2.2 Configure mgmt physical interface as slave to cloudbr0
+    - name: Configure mgmt Interface as bridge slave
+      community.general.nmcli:
+        conn_name: "{{ iface_mgmt_phys }}"
+        ifname: "{{ iface_mgmt_phys }}"
+        type: ethernet
+        master: cloudbr0
+        slave_type: bridge
         state: present
 
     # 3. Create Active-Backup Bond (bond0)
@@ -184,19 +269,45 @@
         zone: trusted
         state: present
 
-    # 6. Apply the configuration
+    # 6. Create cloudbr1 (User Bridge)
+    - name: Create user bridge (cloudbr1)
+      community.general.nmcli:
+        conn_name: cloudbr1
+        ifname: cloudbr1
+        type: bridge
+        mtu: 9000
+        stp: false
+        method4: disabled
+        method6: disabled
+        state: present
+
+    # 7. Create VLAN 563 on Bond0 and attach to cloudbr1
+    - name: Create VLAN 563 on Bond0
+      community.general.nmcli:
+        conn_name: bond0.{{ vlan_user }}
+        ifname: bond0.{{ vlan_user }}
+        type: vlan
+        vlanid: "{{ vlan_user }}"
+        vlandev: bond0
+        mtu: 9000
+        master: cloudbr1
+        slave_type: bridge
+        state: present
+
+    # 8. Apply the configuration
     - name: Reload NetworkManager to apply changes
       ansible.builtin.service:
         name: NetworkManager
         state: reloaded
 
-    # 7. Ensure master connections activate and pull in their freed slaves
+    # 9. Ensure master connections activate and pull in their freed slaves
     - name: Bring up master connections
       ansible.builtin.command: "nmcli con up {{ item }}"
       loop:
         - bond0
         - bond0.{{ vlan_sp }}
-        - "{{ iface_mgmt_phys }}"
+        - cloudbr0
+        - cloudbr1
       changed_when: true
 
     - name: Ensure UFW firewall is installed
